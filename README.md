@@ -1,3 +1,5 @@
+![Docker Pulls](https://img.shields.io/docker/pulls/spidermila/wsdownloader)
+
 # CZ readme
 Find the ENG readme section below
 
