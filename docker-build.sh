@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Build image tag (change if you like)
-IMAGE_TAG="downloader:latest"
+IMAGE_TAG="wsdownloader:latest"
 
 cd ${HOME}/docker/wsdownloader
 docker build -t "${IMAGE_TAG}" .
