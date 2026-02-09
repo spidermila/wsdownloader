@@ -7,7 +7,7 @@ ARG BUILD_DATE
 
 # ---- OCI image labels (best practice) ----
 LABEL org.opencontainers.image.title="wsdownloader" \
-      org.opencontainers.image.description="Web service for downloading files" \
+      org.opencontainers.image.description="web UI for automating file downloads not only from webshare.cz" \
       org.opencontainers.image.source="https://github.com/spidermila/wsdownloader" \
       org.opencontainers.image.url="https://hub.docker.com/r/spidermila/wsdownloader" \
       org.opencontainers.image.licenses="MIT" \
