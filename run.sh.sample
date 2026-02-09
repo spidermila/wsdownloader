@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE_TAG="downloader:latest"
-CONTAINER_NAME="downloader"
+IMAGE_TAG="wsdownloader:latest"
+CONTAINER_NAME="wsdownloader"
 
 # If a previous container exists, remove it
 if docker ps -a --format '{{.Names}}' | grep -Eq "^${CONTAINER_NAME}\$"; then
@@ -14,12 +14,12 @@ docker run -d \
   --name "${CONTAINER_NAME}" \
   --user "1000:1000" \
   --network proxy \
-  --dns 192.168.111.5 \
+  --dns 192.168.1.1 \
   -p 5555:5000 \
   -e WEB_CONCURRENCY="${WEB_CONCURRENCY:-2}" \
   -e WEB_THREADS="${WEB_THREADS:-4}" \
-  -v "/mnt/usb/filmy:/downloads" \
-  -v "${HOME}/docker/downloader/data:/data" \
+  -v "${HOME}/downloads:/downloads" \
+  -v "${HOME}/wsdownloader/data:/data" \
   "${IMAGE_TAG}"
 
 echo "Container ${CONTAINER_NAME} is starting."
