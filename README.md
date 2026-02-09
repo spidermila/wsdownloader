@@ -1,4 +1,11 @@
-![Docker Pulls](https://img.shields.io/docker/pulls/spidermila/wsdownloader)
+## Docker Image
+
+[![Docker Pulls](https://img.shields.io/docker/pulls/spidermila/wsdownloader?style=flat-square)](https://hub.docker.com/r/spidermila/wsdownloader)
+[![Docker Image Version](https://img.shields.io/docker/v/spidermila/wsdownloader?sort=semver)](https://hub.docker.com/r/spidermila/wsdownloader)
+
+```bash
+docker pull spidermila/wsdownloader
+```
 
 # CZ readme
 Find the ENG readme section below
