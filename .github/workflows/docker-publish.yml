@@ -34,7 +34,7 @@ jobs:
           docker build \
             -t spidermila/wsdownloader:${{ inputs.version }} \
             .
-          docker push myorg/myapp:${{ inputs.version }}
+          docker push spidermila/wsdownloader:${{ inputs.version }}
 
       - name: Tag and push latest
         if: inputs.push_latest == 'true'
