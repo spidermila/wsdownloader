@@ -1,0 +1,5 @@
+Flask==3.1.2
+Flask-SocketIO==5.6.0
+requests==2.32.5
+gunicorn==25.0.1
+passlib==1.7.4

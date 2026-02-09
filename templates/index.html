@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="cs" data-bs-theme="{{ 'dark' if settings and settings.dark_mode else 'light' }}">
+<head>
+  <meta charset="UTF-8" />
+  <title>Stahovač</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <link
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css"
+    rel="stylesheet"
+  />
+
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    a { text-decoration: none; }
+    .empty { color: #777; }
+    .progress { --bs-progress-bar-color: var(--bs-body-color); --bs-progress-bg: #6c757d; }
+    td.text-break, th.text-break { word-wrap: break-word; word-break: break-word; }
+    .progress-bar { --bs-progress-bar-bg: #2e7d32; overflow: visible; }
+    .alert {
+      white-space: normal;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      transition: opacity 0.3s ease-out;
+    }
+
+    @media (max-width: 575.98px) {
+      .table.table-striped > :not(caption) > * > * {
+        padding: 0.5rem 0.5rem;
+      }
+    }
+  </style>
+</head>
+<body class="">
+
+  <!-- Top login/status strip -->
+  <div class="bg-body-tertiary border-bottom py-2">
+    <div class="container">
+      {% if settings and settings.token %}
+        <div class="row align-items-center g-2">
+          <div class="col">
+            <div class="small">
+              <span class="text-success fw-semibold">Přihlášeno na WS</span>
+            </div>
+            <div>
+              <form method="post" action="{{ url_for('update_auto_download') }}" class="form-check form-switch m-0">
+                <input class="form-check-input" type="checkbox" role="switch"
+                      id="auto_download" name="auto_download"
+                      {% if settings and settings.auto_download %}checked{% endif %}
+                      onchange="this.form.submit()">
+                <label class="form-check-label small" for="auto_download">
+                  Automatické stahování
+                </label>
+              </form>
+            </div>
+          </div>
+          <div class="col-auto d-flex align-items-center gap-2">
+            <form method="post" action="{{ url_for('update_dark_mode') }}" class="form-check form-switch m-0">
+              <input class="form-check-input" type="checkbox" role="switch"
+                    id="dark_mode" name="dark_mode"
+                    {% if settings and settings.dark_mode %}checked{% endif %}
+                    onchange="this.form.submit()">
+              <label class="form-check-label small" for="dark_mode">Tmavý režim</label>
+            </form>
+            <form method="post" action="{{ url_for('logout') }}">
+              <button type="submit" class="btn btn-sm btn-outline-secondary">Odhlásit</button>
+            </form>
+          </div>
+        </div>
+      {% else %}
+        <div class="row g-2 align-items-center">
+          <div class="col-12 col-lg">
+            <form class="row g-2 align-items-center" method="post" action="{{ url_for('save_login') }}" novalidate>
+              <div class="col-auto">
+                <label class="visually-hidden" for="user_name">Uživatelské jméno</label>
+                <input
+                  type="text"
+                  id="user_name"
+                  name="user_name"
+                  class="form-control form-control-sm"
+                  placeholder="uživatelské jméno"
+                  required
+                  autocomplete="username"
+                />
+              </div>
+              <div class="col-auto">
+                <label class="visually-hidden" for="password">Heslo</label>
+                <input
+                  type="password"
+                  id="password"
+                  name="password"
+                  class="form-control form-control-sm"
+                  placeholder="heslo"
+                  required
+                  autocomplete="current-password"
+                />
+              </div>
+              <div class="col-auto d-grid">
+                <button type="submit" class="btn btn-sm btn-primary">Přihlásit</button>
+              </div>
+              <div class="col-auto">
+                <div class="form-text mt-0">
+                  Přihlašovací údaje pro Webshare.
+                </div>
+              </div>
+            </form>
+          </div>
+          <div class="col-auto">
+            <form method="post" action="{{ url_for('update_dark_mode') }}" class="form-check form-switch m-0">
+              <input class="form-check-input" type="checkbox" role="switch"
+                    id="dark_mode_login" name="dark_mode"
+                    {% if settings and settings.dark_mode %}checked{% endif %}
+                    onchange="this.form.submit()">
+              <label class="form-check-label small" for="dark_mode_login">Tmavý režim</label>
+            </form>
+          </div>
+        </div>
+      {% endif %}
+      </div>
+    </div>
+  <!-- /Top strip -->
+
+  <div class="container py-4">
+
+    <h1 class="mb-4 d-flex align-items-center justify-content-between">
+      <a href="/" class="text-decoration-none text-reset">Linky ke stažení</a>
+      <a href="{{ url_for('help_page') }}" class="btn btn-outline-secondary btn-sm">Nápověda</a>
+    </h1>
+
+    <form method="post" action="{{ url_for('index') }}" novalidate class="row g-2">
+      <div class="col-12 col-md-8">
+        <input
+          type="url"
+          name="link"
+          class="form-control"
+          placeholder="https://..."
+          required
+          autofocus
+          inputmode="url"
+          aria-label="Vložit odkaz ke stažení"
+        />
+      </div>
+      <div class="col-12 col-md-4 d-grid">
+        <button type="submit" class="btn btn-primary">
+          Přidat
+        </button>
+      </div>
+    </form>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          {% set alert_class = 'alert-danger' if category == 'error' else 'alert-warning' if category == 'warning' else 'alert-success' %}
+          {% set alert_timeout = 30000 if category == 'error' else 15000 %}
+          <div class="alert {{ alert_class }} py-2 mt-3" role="alert" data-timeout="{{ alert_timeout }}">
+            {{ message }}
+          </div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <div id="links-container">
+      {% if links and links|length > 0 %}
+        <div class="table-responsive">
+          <table class="table table-striped align-middle">
+            <thead>
+              <tr>
+                <th scope="col" class="text-break col-filename">Soubor</th>
+                <th scope="col" class="d-sm-table-cell">Status</th>
+                <th scope="col" class="d-sm-table-cell">Velikost</th>
+                <th scope="col" class="d-sm-table-cell">Progres</th>
+                <th scope="col">Akce</th>
+              </tr>
+            </thead>
+            <tbody id="links-tbody">
+              {% for l in links %}
+                <tr>
+                  <td class="fw-semibold text-break col-filename">{{ l.get_file_name() }}</td>
+                  <td class="d-sm-table-cell">
+                    {% if l.status == "new" %}
+                      čeká na stažení
+                    {% elif l.status == "downloading" %}
+                      stahování
+                    {% elif l.status == "space_waiting" %}
+                      Nedostatek místa na disku. Smaž nějaké stažené soubory.
+                    {% else %}
+                      &mdash;
+                    {% endif %}
+                  </td>
+                  <td class="d-sm-table-cell">{{ l.get_human_size() }}</td>
+                  <td class="d-sm-table-cell">
+                    {% if l.status == "downloading" %}
+                      {{ l.pct_downloaded }}% Staženo
+                    {% else %}
+                      &mdash;
+                    {% endif %}
+                  </td>
+                  <td>
+                    {% if l.status != "downloading" %}
+                      <form method="post" action="{{ url_for('delete_link') }}" class="d-inline">
+                        <input type="hidden" name="url" value="{{ l.url }}">
+                        <button type="submit" class="btn btn-sm btn-danger" aria-label="Odstranit {{ l.url }}">
+                          Smazat
+                        </button>
+                      </form>
+                    {% else %}
+                      <span class="text-muted">—</span>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="empty mt-3">
+          Žádné linky v seznamu pro stahování.
+          <a href="{{ url_for('help_page') }}">Jak přidat link?</a>
+        </p>
+      {% endif %}
+    </div>
+
+    <hr class="my-4">
+
+    <div class="row align-items-center g-3 mt-4 mb-3">
+      <div class="col-auto">
+        <h2 class="mb-0">Stažené soubory</h2>
+      </div>
+      <div class="col">
+        {% if fs and fs.total > 0 %}
+          <div class="progress" style="height: 1.5rem;" title="{{ fs.free_h }} volné z {{ fs.total_h }}" id="fs-progress">
+            <div class="progress-bar text-white" role="progressbar" style="width: {{ fs.percent_free }}%;" aria-valuenow="{{ fs.percent_free }}" aria-valuemin="0" aria-valuemax="100">
+              <span id="fs-text">{{ fs.free_h }} volné z {{ fs.total_h }} ({{ '%.0f'|format(fs.percent_free) }}%)</span>
+            </div>
+          </div>
+        {% else %}
+          <div class="alert alert-warning py-2 mb-0" role="alert">
+            Nelze zjistit stav volného místa.
+          </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <div id="files-container">
+      {% if files and files|length > 0 %}
+        <div class="table-responsive">
+          <table class="table table-striped align-middle">
+            <thead>
+              <tr>
+                <th scope="col" class="text-break col-filename">Soubor</th>
+                <th scope="col" class="d-none d-sm-table-cell">Velikost</th>
+                <th scope="col">Akce</th>
+              </tr>
+            </thead>
+            <tbody id="files-tbody">
+              {% for f in files %}
+                <tr>
+                  <td class="fw-semibold text-break col-filename">{{ f.name }}</td>
+                  <td class="d-none d-sm-table-cell">{{ f.size }}</td>
+                  <td>
+                    <form method="post" action="{{ url_for('delete_file') }}" class="d-inline">
+                      <input type="hidden" name="filename" value="{{ f.name }}">
+                      <button type="submit" class="btn btn-sm btn-danger" aria-label="Odstranit {{ f.name }}">
+                        Smazat
+                      </button>
+                    </form>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="empty">Žádné stažené soubory.</p>
+      {% endif %}
+    </div>
+
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+  <script>
+    const socket = io({ transports: ["websocket"] });
+
+    const fsProgress = document.getElementById('fs-progress');
+    const fsText = document.getElementById('fs-text');
+
+    function renderLinks(links) {
+      const container = document.getElementById('links-container');
+      if (!container) return;
+
+      if (!links || links.length === 0) {
+        container.innerHTML = `
+          <p class="empty mt-3">
+            Žádné linky v seznamu pro stahování.
+            <a href="{{ url_for('help_page') }}">Jak přidat link?</a>
+          </p>
+        `;
+        return;
+      }
+
+      // Create table if needed
+      container.innerHTML = `
+        <div class="table-responsive">
+          <table class="table table-striped align-middle">
+            <thead>
+              <tr>
+                <th scope="col" class="text-break col-filename">Soubor</th>
+                <th scope="col" class="d-sm-table-cell">Status</th>
+                <th scope="col" class="d-sm-table-cell">Velikost</th>
+                <th scope="col" class="d-sm-table-cell">Progres</th>
+                <th scope="col">Akce</th>
+              </tr>
+            </thead>
+            <tbody id="links-tbody"></tbody>
+          </table>
+        </div>
+      `;
+
+      const tbody = document.getElementById('links-tbody');
+      links.forEach(l => {
+        const tr = document.createElement('tr');
+        tr.dataset.url = l.url;
+        tr.innerHTML = `
+          <td class="fw-semibold text-break col-filename">${l.file_name}</td>
+          <td class="d-sm-table-cell status-cell">${renderStatus(l.status)}</td>
+          <td class="d-sm-table-cell size-cell">${l.human_size}</td>
+          <td class="d-sm-table-cell progress-cell">${renderProgress(l)}</td>
+          <td class="actions-cell">${renderActions(l)}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function renderFiles(files) {
+      const container = document.getElementById('files-container');
+      if (!container) return;
+
+      if (!files || files.length === 0) {
+        container.innerHTML = '<p class="empty">Žádné stažené soubory.</p>';
+        return;
+      }
+
+      container.innerHTML = `
+        <div class="table-responsive">
+          <table class="table table-striped align-middle">
+            <thead>
+              <tr>
+                <th scope="col" class="text-break col-filename">Soubor</th>
+                <th scope="col" class="d-none d-sm-table-cell">Velikost</th>
+                <th scope="col">Akce</th>
+              </tr>
+            </thead>
+            <tbody id="files-tbody"></tbody>
+          </table>
+        </div>
+      `;
+
+      const tbody = document.getElementById('files-tbody');
+      files.forEach(f => {
+        const tr = document.createElement('tr');
+        tr.dataset.filename = f.name;
+        tr.innerHTML = `
+          <td class="fw-semibold text-break col-filename">${f.name}</td>
+          <td class="d-none d-sm-table-cell">${f.size}</td>
+          <td>
+            <form method="post" action="{{ url_for('delete_file') }}" class="d-inline">
+              <input type="hidden" name="filename" value="${f.name}">
+              <button type="submit" class="btn btn-sm btn-danger" aria-label="Odstranit ${f.name}">
+                Smazat
+              </button>
+            </form>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function renderStatus(status) {
+      if (status === 'new') return 'čeká na stažení';
+      if (status === 'downloading') return 'stahování';
+      if (status === 'space_waiting') return 'Nedostatek místa na disku. Smaž nějaké stažené soubory.';
+      return '&mdash;';
+    }
+
+    function renderProgress(l) {
+      return l.status === 'downloading' ? `${l.pct_downloaded}% Staženo` : '&mdash;';
+    }
+
+    function renderActions(l) {
+      if (l.status === 'downloading') return '<span class="text-muted">—</span>';
+      return `
+        <form method="post" action="{{ url_for('delete_link') }}" class="d-inline">
+          <input type="hidden" name="url" value="${l.url}">
+          <button type="submit" class="btn btn-sm btn-danger" aria-label="Odstranit ${l.url}">
+            Smazat
+          </button>
+        </form>
+      `;
+    }
+
+    function updateFs(fs) {
+      if (!fsProgress || !fsText) return;
+      fsProgress.style.setProperty('--bs-progress-bar-color', 'var(--bs-body-color)');
+      const bar = fsProgress.querySelector('.progress-bar');
+      bar.style.width = `${fs.percent_free}%`;
+      bar.setAttribute('aria-valuenow', fs.percent_free);
+      fsText.textContent = `${fs.free_h} volné z ${fs.total_h} (${Math.round(fs.percent_free)}%)`;
+    }
+
+    socket.on('connect', () => {
+      console.log('Connected to server');
+    });
+
+    socket.on('full_update', (payload) => {
+      console.log('Received update:', payload);
+      if (payload.links !== undefined) renderLinks(payload.links);
+      if (payload.files !== undefined) renderFiles(payload.files);
+      if (payload.fs) updateFs(payload.fs);
+    });
+
+    socket.on('disconnect', () => {
+      console.log('Disconnected from server');
+    });
+
+    // Keep the periodic update as fallback
+    setInterval(() => socket.emit('request_update'), 2000);
+
+    document.querySelectorAll('.alert').forEach((el) => {
+      const timeout = Number(el.dataset.timeout || 15000);
+      setTimeout(() => {
+        el.style.transition = 'opacity 0.3s ease-out';
+        el.style.opacity = '0';
+        setTimeout(() => {
+          if (el.parentNode) el.remove();
+        }, 300);
+      }, timeout);
+    });
+  </script>
+</body>
+</html>
