@@ -23,6 +23,8 @@
       word-break: break-word;
       transition: opacity 0.3s ease-out;
     }
+    h1 { font-size: 1.rem; }
+    .col-filename { font-size: 1rem; }
 
     @media (max-width: 575.98px) {
       .table.table-striped > :not(caption) > * > * {
@@ -224,7 +226,7 @@
 
     <div class="row align-items-center g-3 mt-4 mb-3">
       <div class="col-auto">
-        <h2 class="mb-0">Stažené soubory</h2>
+        <h1 class="mb-0">Stažené soubory</h1>
       </div>
       <div class="col">
         {% if fs and fs.total > 0 %}
