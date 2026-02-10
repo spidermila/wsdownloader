@@ -701,7 +701,7 @@ def help_page():
 @socketio.on('connect')
 def handle_connect():
     """Send current state when client connects."""
-    print('Client connected via WebSocket')
+    # print('Client connected via WebSocket')
     links = read_links_from_db()
     files = list_downloaded_files()
     fs = get_fs_usage(DOWNLOADS_PATH)
@@ -717,7 +717,8 @@ def handle_connect():
 @socketio.on('disconnect')
 def handle_disconnect():
     """Handle client disconnection."""
-    print('Client disconnected')
+    pass
+    # print('Client disconnected')
 
 
 @socketio.on('request_update')
