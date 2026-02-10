@@ -14,7 +14,7 @@ on:
 jobs:
   publish:
     if: github.ref == 'refs/heads/main'
-    runs-on: [self-hosted, Linux, X86]
+    runs-on: [self-hosted, linux, x86]
 
     steps:
       - name: Checkout source
