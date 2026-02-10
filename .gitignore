@@ -1,5 +1,6 @@
 data/
 __pycache__/
 dev_env.sh
+dev_run.sh
 run.sh
 publish-image.sh
