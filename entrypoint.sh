@@ -17,6 +17,7 @@ PY
 : "${WEB_THREADS:=2}"
 gunicorn "app:app" \
   --bind 0.0.0.0:5000 \
+  --no-control-socket \
   --workers "${WEB_CONCURRENCY}" \
   --threads "${WEB_THREADS}" \
   --logger-class "app.MyGunicornLogger" \
