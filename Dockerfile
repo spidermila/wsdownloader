@@ -29,7 +29,7 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-COPY app.py downloader.py /app/
+COPY app.py downloader.py logger.py /app/
 COPY templates/ /app/templates/
 
 # Create download path and data path
