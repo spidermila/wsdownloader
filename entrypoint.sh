@@ -17,9 +17,13 @@ PY
 : "${WEB_THREADS:=2}"
 gunicorn "app:app" \
   --bind 0.0.0.0:5000 \
+  --no-control-socket \
   --workers "${WEB_CONCURRENCY}" \
   --threads "${WEB_THREADS}" \
+  --logger-class "app.MyGunicornLogger" \
   --access-logfile '-' \
+  --access-logformat '%(t)s [gunicorn] %(p)s %(h)s %(l)s %(u)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s"' \
+  --log-level "info" \
   --error-logfile '-' &
 APP_PID=$!
 
