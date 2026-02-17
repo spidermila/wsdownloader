@@ -4,15 +4,15 @@ import os
 app_name = 'logger.py'
 
 
-class Logger:
+class WSLogger:
     _instance = None
     _initialized = False
 
     def __init__(self, source: str) -> None:
         self.source = source
-        if not Logger._initialized:
+        if not WSLogger._initialized:
             self._setup_verbosity()
-            Logger._initialized = True
+            WSLogger._initialized = True
 
     def _setup_verbosity(self) -> None:
         _verbosity = os.getenv('VERBOSITY', '1')
@@ -36,6 +36,7 @@ class Logger:
         :param source: Name of the application component generating the message
         :param level: Verbosity level of the message (0=error, 1=normal, 2=debug). Messages with a level higher than the configured verbosity will not be printed.
         '''  # NOQA: E501
+        # timestamp formatted as YYYY-MM-DD HH:MM:SS.mmm
         if level > self.verbosity:
             return
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]  # NOQA: E501

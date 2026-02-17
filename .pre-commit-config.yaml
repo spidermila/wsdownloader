@@ -36,3 +36,4 @@ repos:
         additional_dependencies: [types-PyYAML, types-requests, Flask, types-passlib, types-Flask-SocketIO]
         args:
         - --explicit-package-bases
+        - --ignore-missing-imports

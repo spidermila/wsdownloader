@@ -5,6 +5,7 @@ import secrets
 import shutil
 import sqlite3
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from pathlib import Path
 from threading import Thread
 from time import sleep
@@ -22,14 +23,15 @@ from flask import request
 from flask import url_for
 from flask_socketio import emit
 from flask_socketio import SocketIO
+from gunicorn.glogging import Logger as GunicornLogger
 from passlib.hash import md5_crypt
 
-from logger import Logger
+from logger import WSLogger
 
 
 app = Flask(__name__)
 
-logger = Logger('app.py')
+logger = WSLogger('app.py')
 
 # Set secret key for session/flash support
 app.secret_key = os.getenv('FLASK_SECRET_KEY') or secrets.token_hex(32)
@@ -57,6 +59,18 @@ socketio = SocketIO(app, cors_allowed_origins='*')
 _last_db_hash = None
 _monitor_thread = None
 _monitor_running = False
+
+
+# custom Gunicorn logger to override timestamp formatting
+class MyGunicornLogger(GunicornLogger):
+    def atoms(self, resp, req, environ, request_time):
+        """Override atoms to use custom timestamp format"""
+        atoms = super().atoms(resp, req, environ, request_time)
+        # Format: [2026-02-17 14:12:26.854]
+        dt = datetime.now()
+        ms = f"{int(dt.microsecond / 1000):03d}"
+        atoms['t'] = f"[{dt.strftime(f'%Y-%m-%d %H:%M:%S.{ms}')}]"
+        return atoms
 
 
 class Link:
@@ -110,7 +124,7 @@ def init_db() -> None:
             )
         """)
 
-        # NEW: settings singleton table (id is forced to be 1)
+        # NEW: settings singleton table (id is forced to 1)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 id INTEGER PRIMARY KEY CHECK (id = 1),

@@ -11,10 +11,10 @@ from typing import TypedDict
 import requests
 from requests import HTTPError
 
-from logger import Logger
+from logger import WSLogger
 
 
-logger = Logger('downloader.py')
+logger = WSLogger('downloader.py')
 
 # --- Configurable paths ---
 # In dev, default to project-local ./data and ./downloads
