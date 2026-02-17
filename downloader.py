@@ -10,6 +10,7 @@ from typing import TypedDict
 
 import requests
 from requests import HTTPError
+from requests import RequestException
 
 from logger import WSLogger
 
@@ -29,6 +30,19 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 DOWNLOADS_PATH.mkdir(parents=True, exist_ok=True)
 
 BASE_URL = 'https://webshare.cz/api/'
+
+
+def _parse_total_size_from_content_range(content_range: str) -> int | None:
+    """
+    Example Content-Range: 'bytes 100-999/12345'
+    Returns total size (12345) or None if not parseable.
+    """
+    try:
+        _, range_part = content_range.split(' ', 1)
+        _, total = range_part.split('/', 1)
+        return int(total) if total.isdigit() else None
+    except Exception:
+        return None
 
 
 def get_db() -> sqlite3.Connection:
@@ -184,6 +198,7 @@ def api_post(url: str | bytes, data: dict, headers: dict) -> tuple[str, str]:
 
 
 def download_file(url: str, row_id: int) -> None:
+    chunk_size = 1024 * 1024  # 1 MiB is usually more efficient than 8 KiB for big files  # NOQA: E501
     fs_usage = get_fs_usage()
     if fs_usage['percent_free'] < 5:
         set_status_downloaded_by_id(
@@ -193,58 +208,142 @@ def download_file(url: str, row_id: int) -> None:
         return
     local_filename = url.split('/')[-1]
     temp_filepath = Path(os.path.join(DOWNLOADS_PATH, '.' + local_filename))
-    response = requests.head(url)
-    file_size = int(response.headers['Content-Length'])
-    bytes_downloaded = 0
-    message = f'downloading: {temp_filepath}'
-    logger.log_message(message, 2)
-    with requests.get(url, stream=True) as r:
-        try:
-            r.raise_for_status()
-            with open(temp_filepath, 'wb') as f:
-                message = f'download_file() Starting download of {url} to {temp_filepath}, file size: {file_size} bytes'  # NOQA: E501
-                logger.log_message(message, 1)
-                set_status_downloaded_by_id(
-                    row_id=row_id,
-                    new_status='downloading',
-                )
-                chunk_size = 8192
-                last_update_time = time()
-                update_interval = 2  # seconds
+    final_filepath = Path(os.path.join(DOWNLOADS_PATH, local_filename))
+    # If a temp file exists, attempt resume
+    existing_bytes = temp_filepath.stat().st_size if temp_filepath.exists() else 0  # NOQA: E501
 
+    # Try HEAD to get metadata (optional but useful)
+    total_size = None
+    last_modified = None
+    # accept_ranges = None
+    try:
+        head = requests.head(url, allow_redirects=True, timeout=30)
+        head.raise_for_status()
+        head_headers = head.headers
+        if 'Content-Length' in head_headers:
+            total_size = int(head_headers['Content-Length'])
+        last_modified = head_headers.get('Last-Modified')
+        # accept_ranges = head_headers.get('Accept-Ranges')
+    except RequestException:
+        # HEAD may fail; we'll rely on GET response headers instead
+        pass
+
+    # If we already have the full file (based on HEAD), finalize quickly
+    if total_size is not None and existing_bytes == total_size and existing_bytes > 0:  # NOQA: E501
+        # rename temp to final if needed
+        if temp_filepath.exists() and not final_filepath.exists():
+            temp_filepath.replace(final_filepath)
+        delete_by_id(row_id)
+        return
+
+    headers = {}
+
+    # Only attempt resume if we have partial content
+    if existing_bytes > 0:
+        headers['Range'] = f"bytes={existing_bytes}-"
+        # If-Range helps ensure we only resume if the file hasn't changed
+        if last_modified:
+            headers['If-Range'] = last_modified
+
+    message = f"download_file() Starting download of {url} to {temp_filepath} (resume from {existing_bytes} bytes)"  # NOQA: E501
+    logger.log_message(message, 1)
+    set_status_downloaded_by_id(row_id=row_id, new_status='downloading')
+
+    bytes_downloaded = existing_bytes
+    last_update_time = time()
+    update_interval = 2  # seconds
+
+    try:
+        with requests.get(url, headers=headers, stream=True, allow_redirects=True, timeout=30) as r:  # NOQA: E501
+            r.raise_for_status()
+
+            # If we asked for a Range but server ignored it, we'll get 200 and full content.  # NOQA: E501
+            # In that case, restart (truncate temp file).
+            if 'Range' in headers and r.status_code == 200:
+                logger.log_message(
+                    'download_file() Server did not honor Range request; restarting full download.',  # NOQA: E501
+                    1,
+                )
+                existing_bytes = 0
+                bytes_downloaded = 0
+
+            # Determine total size:
+            # - For 206, try Content-Range (gives total file size)
+            # - Else fall back to Content-Length (total for 200)
+            if r.status_code == 206:
+                cr = r.headers.get('Content-Range')
+                total_from_cr = _parse_total_size_from_content_range(cr) if cr else None  # NOQA: E501
+                if total_from_cr is not None:
+                    total_size = total_from_cr
+                # If missing, you can still continue, but progress may be "unknown"  # NOQA: E501
+            else:
+                if total_size is None and r.headers.get('Content-Length'):
+                    total_size = int(r.headers['Content-Length'])
+
+            # Open file in append mode for resume, write mode for fresh download  # NOQA: E501
+            mode = 'ab' if (existing_bytes > 0 and r.status_code == 206) else 'wb'  # NOQA: E501
+            with open(temp_filepath, mode) as f:
                 for chunk in r.iter_content(chunk_size=chunk_size):
+                    if not chunk:
+                        continue
                     f.write(chunk)
-                    bytes_downloaded += chunk_size
-                    pct_downloaded = int(bytes_downloaded / file_size * 100)
+                    bytes_downloaded += len(chunk)
+
                     current_time = time()
                     if current_time - last_update_time >= update_interval:
-                        set_pct_downloaded_by_id(
-                            row_id=row_id,
-                            new_pct=pct_downloaded,
-                        )
+                        if total_size:
+                            pct = int(bytes_downloaded / total_size * 100)
+                            pct = max(0, min(pct, 100))
+                            set_pct_downloaded_by_id(row_id=row_id, new_pct=pct)  # NOQA: E501
                         last_update_time = current_time
-        except HTTPError:
-            message = f"download_file() Connection error while downloading {url} to {temp_filepath}"  # NOQA: E501
-            logger.log_message(message, 0)
-            set_status_downloaded_by_id(
-                row_id=row_id,
-                new_status='connection_failed',
-            )
-            return
-    stat = temp_filepath.stat()
-    final_size = stat.st_size
-    if file_size == final_size:
-        message = f"download_file() Download successful for {url} to {temp_filepath}"  # NOQA: E501
-        logger.log_message(message, 1)
-        os.rename(temp_filepath, os.path.join(DOWNLOADS_PATH, local_filename))
+
+    except HTTPError:
+        logger.log_message(
+            f"download_file() HTTP error while downloading {url} to {temp_filepath}",  # NOQA: E501
+            0,
+        )
+        set_status_downloaded_by_id(row_id=row_id, new_status='connection_failed')  # NOQA: E501
+        return
+    except RequestException:
+        logger.log_message(
+            f"download_file() Connection error while downloading {url} to {temp_filepath}",  # NOQA: E501
+            0,
+        )
+        set_status_downloaded_by_id(row_id=row_id, new_status='connection_failed')  # NOQA: E501
+        return
+    except OSError as e:
+        logger.log_message(
+            f"download_file() File I/O error while writing {temp_filepath}: {e}",  # NOQA: E501
+            0,
+        )
+        set_status_downloaded_by_id(row_id=row_id, new_status='failed')
+        return
+
+    # Validate final size (if known)
+    final_size = temp_filepath.stat().st_size
+    if total_size is None:
+        # We can't verify length, but download ended cleanly.
+        logger.log_message(
+            f"download_file() Download finished (unknown expected size) for {url} to {temp_filepath}",  # NOQA: E501
+            1,
+        )
+        temp_filepath.replace(final_filepath)
+        delete_by_id(row_id)
+        return
+
+    if final_size == total_size:
+        logger.log_message(
+            f"download_file() Download successful for {url} to {temp_filepath}",  # NOQA: E501
+            1,
+        )
+        temp_filepath.replace(final_filepath)
         delete_by_id(row_id)
     else:
-        message = f"download_file() Sizes don't match for {url} to {temp_filepath}, final size: {final_size} bytes"  # NOQA: E501
-        logger.log_message(message, 0)
-        set_status_downloaded_by_id(
-            row_id=row_id,
-            new_status='failed',
+        logger.log_message(
+            f"download_file() Sizes don't match for {url}. Expected {total_size}, got {final_size}.",  # NOQA: E501
+            0,
         )
+        set_status_downloaded_by_id(row_id=row_id, new_status='failed')
 
 
 def check_token(token: str) -> bool:
