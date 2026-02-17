@@ -343,10 +343,11 @@ def get_download_link(token: str, file_id: str) -> tuple[str, str | None]:
             logger.log_message(message, 0)
             message_elem = root.find('message')
             if isinstance(message_elem, ET.Element) and message_elem.text:
+                # <response><status>FATAL</status><code>FILE_LINK_FATAL_4</code><message>File temporarily unavailable.</message><app_version>30</app_version></response>  # NOQA: E501
                 if message_elem.text == 'File temporarily unavailable.':
+                    message = f"get_download_link() File temporarily unavailable for {file_id=} raw payload: {payload}"  # NOQA: E501
+                    logger.log_message(message, 2)
                     return ('Temporary unavailable', None)
-            # TODO: make better handling for:
-            # <response><status>FATAL</status><code>FILE_LINK_FATAL_4</code><message>File temporarily unavailable.</message><app_version>30</app_version></response>  # NOQA: E501
     message = f"get_download_link() Failed to retrieve download link for {file_id=}"  # NOQA: E501
     logger.log_message(message, 1)
     return ('Not found', None)
