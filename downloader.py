@@ -203,7 +203,7 @@ def download_file(url: str, row_id: int) -> None:
             r.raise_for_status()
             with open(temp_filepath, 'wb') as f:
                 message = f'download_file() Starting download of {url} to {temp_filepath}, file size: {file_size} bytes'  # NOQA: E501
-                logger.log_message(message, 2)
+                logger.log_message(message, 1)
                 set_status_downloaded_by_id(
                     row_id=row_id,
                     new_status='downloading',
@@ -235,11 +235,11 @@ def download_file(url: str, row_id: int) -> None:
     final_size = stat.st_size
     if file_size == final_size:
         message = f"download_file() Download successful for {url} to {temp_filepath}"  # NOQA: E501
-        logger.log_message(message, 2)
+        logger.log_message(message, 1)
         os.rename(temp_filepath, os.path.join(DOWNLOADS_PATH, local_filename))
         delete_by_id(row_id)
     else:
-        message = f"download_file() Sizes don't match for {url} to {temp_filepath}"  # NOQA: E501
+        message = f"download_file() Sizes don't match for {url} to {temp_filepath}, final size: {final_size} bytes"  # NOQA: E501
         logger.log_message(message, 0)
         set_status_downloaded_by_id(
             row_id=row_id,
