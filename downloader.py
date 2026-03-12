@@ -1,6 +1,8 @@
+import logging
 import os
 import shutil
 import sqlite3
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from time import sleep
@@ -12,10 +14,28 @@ import requests
 from requests import HTTPError
 from requests import RequestException
 
-from logger import WSLogger
+
+def configure_logging() -> logging.Logger:
+    allowed_levels = {
+        'INFO': logging.INFO,
+        'WARNING': logging.WARNING,
+        'ERROR': logging.ERROR,
+    }
+    level_name = os.getenv('LOG_LEVEL', 'INFO').upper()
+    level = allowed_levels.get(level_name, logging.INFO)
+
+    logging.basicConfig(
+        level=level,
+        format='[%(asctime)s.%(msecs)03d] %(levelname)s downloader: %(message)s',  # NOQA: E501
+        datefmt='%Y-%m-%d %H:%M:%S',
+        stream=sys.stdout,
+        force=True,
+    )
+    logging.captureWarnings(True)
+    return logging.getLogger(__name__)
 
 
-logger = WSLogger('downloader.py')
+logger = configure_logging()
 
 # --- Configurable paths ---
 # In dev, default to project-local ./data and ./downloads
@@ -51,8 +71,8 @@ def get_db() -> sqlite3.Connection:
     try:
         conn.execute('PRAGMA journal_mode=WAL;')
     except sqlite3.DatabaseError:
-        message = f"Failed to set journal_mode to WAL for {DB_PATH}"
-        logger.log_message(message, 0)
+        message = f'Failed to set journal_mode to WAL for {DB_PATH}'
+        logger.error(message)
     return conn
 
 
@@ -70,11 +90,14 @@ def delete_by_id(row_id: int) -> int:
         cur = db.execute('DELETE FROM links WHERE id = ?', (row_id,))
         db.commit()
         db.close()
-        message = f"delete_by_id() Deleted row with id {row_id}: {'Success' if cur.rowcount > 0 else 'Row not found'}"  # NOQA: E501
-        logger.log_message(message, 2)
+        message = (
+            'delete_by_id() Deleted row with id '
+            f'{row_id}: {"Success" if cur.rowcount > 0 else "Row not found"}'
+        )
+        logger.info(message)
     except sqlite3.Error as e:
-        message = f"delete_by_id() Database error: {e}"
-        logger.log_message(message, 0)
+        message = f'delete_by_id() Database error: {e}'
+        logger.error(message)
         return 0
     return cur.rowcount
 
@@ -89,13 +112,10 @@ def set_pct_downloaded_by_id(row_id: int, new_pct: int) -> bool:
         db.commit()
         updated = cur.rowcount > 0
         db.close()
-        # this was just too spammy for now, but can be re-enabled if needed for debugging  # NOQA: E501
-        # message = f"set_pct_downloaded_by_id() Updated row {row_id} with pct_downloaded={new_pct}: {'Success' if updated else 'Row not found'}"  # NOQA: E501
-        # logger.log_message(message, 2)
         return updated
     except sqlite3.Error as e:
-        message = f"set_pct_downloaded_by_id() Database error: {e}"
-        logger.log_message(message, 0)
+        message = f'set_pct_downloaded_by_id() Database error: {e}'
+        logger.error(message)
         return False
 
 
@@ -109,12 +129,16 @@ def set_file_size_by_id(row_id: int, size_bytes: int) -> bool:
         db.commit()
         updated = cur.rowcount > 0
         db.close()
-        message = f"set_file_size_by_id() Updated row {row_id} with size_bytes={size_bytes}: {'Success' if updated else 'Row not found'}"  # NOQA: E501
-        logger.log_message(message, 2)
+        message = (
+            'set_file_size_by_id() Updated row '
+            f'{row_id} with size_bytes={size_bytes}: '
+            f'{"Success" if updated else "Row not found"}'
+        )
+        logger.info(message)
         return updated
     except sqlite3.Error as e:
-        message = f"set_file_size_by_id() Database error: {e}"
-        logger.log_message(message, 0)
+        message = f'set_file_size_by_id() Database error: {e}'
+        logger.error(message)
         return False
 
 
@@ -128,12 +152,16 @@ def set_status_downloaded_by_id(row_id: int, new_status: str) -> bool:
         db.commit()
         updated = cur.rowcount > 0
         db.close()
-        message = f"set_status_downloaded_by_id() Updated row {row_id} with status='{new_status}': {'Success' if updated else 'Row not found'}"  # NOQA: E501
-        logger.log_message(message, 2)
+        message = (
+            'set_status_downloaded_by_id() Updated row '
+            f"{row_id} with status='{new_status}': "
+            f'{"Success" if updated else "Row not found"}'
+        )
+        logger.info(message)
         return updated
     except sqlite3.Error as e:
-        message = f"set_status_downloaded_by_id() Database error: {e}"
-        logger.log_message(message, 0)
+        message = f'set_status_downloaded_by_id() Database error: {e}'
+        logger.error(message)
         return False
 
 
@@ -155,7 +183,6 @@ def get_settings() -> dict:
 
 
 def get_fs_usage(base_path: Optional[Path] = None) -> dict:
-    # Prefer the configured downloads path if none provided
     if base_path is None:
         base_path = DOWNLOADS_PATH
     try:
@@ -169,10 +196,15 @@ def get_fs_usage(base_path: Optional[Path] = None) -> dict:
             'percent_free': round(percent_free, 1),
         }
     except Exception as e:
-        message = f"get_fs_usage() Error getting filesystem usage for {base_path}: {e}"  # NOQA: E501
-        logger.log_message(message, 0)
+        message = (
+            'get_fs_usage() Error getting filesystem usage '
+            f'for {base_path}: {e}'
+        )
+        logger.error(message)
         return {
-            'total': 0, 'used': 0, 'free': 0,
+            'total': 0,
+            'used': 0,
+            'free': 0,
             'percent_free': 0.0,
             'mount_display': str(base_path),
         }
@@ -181,24 +213,27 @@ def get_fs_usage(base_path: Optional[Path] = None) -> dict:
 def api_post(url: str | bytes, data: dict, headers: dict) -> tuple[str, str]:
     try:
         response = requests.post(url, data=data, headers=headers)
-    except ConnectionError as e:
-        message = f"api_post() Connection failed: {e}"
-        logger.log_message(message, 0)
+    except RequestException as e:
+        message = f'api_post() Connection failed: {e}'
+        logger.error(message)
         return ('Connection failed', '<dummy></dummy>')
+
     rc = response.status_code
-    if not rc == 200:
-        message = f"api_post() Got RC: {rc}, {response.text=}"
-        logger.log_message(message, 0)
+    if rc != 200:
+        message = f'api_post() Got RC: {rc}, response.text={response.text!r}'
+        logger.error(message)
         return ('Connection failed', '<dummy></dummy>')
+
     if isinstance(url, bytes):
         url = url.decode('utf-8', errors='replace')
-    message = f"api_post() Successful POST to {url}, RC: {rc}"
-    logger.log_message(message, 2)
+
+    message = f'api_post() Successful POST to {url}, RC: {rc}'
+    logger.info(message)
     return ('OK', response.text)
 
 
 def download_file(url: str, row_id: int) -> None:
-    chunk_size = 1024 * 1024  # 1 MiB is usually more efficient than 8 KiB for big files  # NOQA: E501
+    chunk_size = 1024 * 1024
     fs_usage = get_fs_usage()
     if fs_usage['percent_free'] < 5:
         set_status_downloaded_by_id(
@@ -206,16 +241,18 @@ def download_file(url: str, row_id: int) -> None:
             new_status='space_waiting',
         )
         return
-    local_filename = url.split('/')[-1]
-    temp_filepath = Path(os.path.join(DOWNLOADS_PATH, '.' + local_filename))
-    final_filepath = Path(os.path.join(DOWNLOADS_PATH, local_filename))
-    # If a temp file exists, attempt resume
-    existing_bytes = temp_filepath.stat().st_size if temp_filepath.exists() else 0  # NOQA: E501
 
-    # Try HEAD to get metadata (optional but useful)
+    local_filename = url.split('/')[-1]
+    temp_filepath = DOWNLOADS_PATH / f'.{local_filename}'
+    final_filepath = DOWNLOADS_PATH / local_filename
+
+    existing_bytes = (
+        temp_filepath.stat().st_size if temp_filepath.exists() else 0
+    )
+
     total_size = None
     last_modified = None
-    # accept_ranges = None
+
     try:
         head = requests.head(url, allow_redirects=True, timeout=30)
         head.raise_for_status()
@@ -223,65 +260,70 @@ def download_file(url: str, row_id: int) -> None:
         if 'Content-Length' in head_headers:
             total_size = int(head_headers['Content-Length'])
         last_modified = head_headers.get('Last-Modified')
-        # accept_ranges = head_headers.get('Accept-Ranges')
     except RequestException:
-        # HEAD may fail; we'll rely on GET response headers instead
         pass
 
-    # If we already have the full file (based on HEAD), finalize quickly
-    if total_size is not None and existing_bytes == total_size and existing_bytes > 0:  # NOQA: E501
-        # rename temp to final if needed
+    if (
+        total_size is not None and
+        existing_bytes == total_size and
+        existing_bytes > 0
+    ):
         if temp_filepath.exists() and not final_filepath.exists():
             temp_filepath.replace(final_filepath)
         delete_by_id(row_id)
         return
 
     headers = {}
-
-    # Only attempt resume if we have partial content
     if existing_bytes > 0:
-        headers['Range'] = f"bytes={existing_bytes}-"
-        # If-Range helps ensure we only resume if the file hasn't changed
+        headers['Range'] = f'bytes={existing_bytes}-'
         if last_modified:
             headers['If-Range'] = last_modified
 
-    message = f"download_file() Starting download of {url} to {temp_filepath} (resume from {existing_bytes} bytes)"  # NOQA: E501
-    logger.log_message(message, 1)
+    message = (
+        'download_file() Starting download of '
+        f'{url} to {temp_filepath} '
+        f'(resume from {existing_bytes} bytes)'
+    )
+    logger.info(message)
     set_status_downloaded_by_id(row_id=row_id, new_status='downloading')
 
     bytes_downloaded = existing_bytes
     last_update_time = time()
-    update_interval = 2  # seconds
+    update_interval = 2
 
     try:
-        with requests.get(url, headers=headers, stream=True, allow_redirects=True, timeout=30) as r:  # NOQA: E501
+        with requests.get(
+            url,
+            headers=headers,
+            stream=True,
+            allow_redirects=True,
+            timeout=30,
+        ) as r:
             r.raise_for_status()
 
-            # If we asked for a Range but server ignored it, we'll get 200 and full content.  # NOQA: E501
-            # In that case, restart (truncate temp file).
             if 'Range' in headers and r.status_code == 200:
-                logger.log_message(
-                    'download_file() Server did not honor Range request; restarting full download.',  # NOQA: E501
-                    1,
+                logger.warning(
+                    'download_file() Server did not honor Range request; '
+                    'restarting full download.',
                 )
                 existing_bytes = 0
                 bytes_downloaded = 0
 
-            # Determine total size:
-            # - For 206, try Content-Range (gives total file size)
-            # - Else fall back to Content-Length (total for 200)
             if r.status_code == 206:
                 cr = r.headers.get('Content-Range')
-                total_from_cr = _parse_total_size_from_content_range(cr) if cr else None  # NOQA: E501
+                total_from_cr = (
+                    _parse_total_size_from_content_range(cr)
+                    if cr else None
+                )
                 if total_from_cr is not None:
                     total_size = total_from_cr
-                # If missing, you can still continue, but progress may be "unknown"  # NOQA: E501
-            else:
-                if total_size is None and r.headers.get('Content-Length'):
-                    total_size = int(r.headers['Content-Length'])
+            elif total_size is None and r.headers.get('Content-Length'):
+                total_size = int(r.headers['Content-Length'])
 
-            # Open file in append mode for resume, write mode for fresh download  # NOQA: E501
-            mode = 'ab' if (existing_bytes > 0 and r.status_code == 206) else 'wb'  # NOQA: E501
+            mode = (
+                'ab' if (existing_bytes > 0 and r.status_code == 206)
+                else 'wb'
+            )
             with open(temp_filepath, mode) as f:
                 for chunk in r.iter_content(chunk_size=chunk_size):
                     if not chunk:
@@ -294,54 +336,61 @@ def download_file(url: str, row_id: int) -> None:
                         if total_size:
                             pct = int(bytes_downloaded / total_size * 100)
                             pct = max(0, min(pct, 100))
-                            set_pct_downloaded_by_id(row_id=row_id, new_pct=pct)  # NOQA: E501
+                            set_pct_downloaded_by_id(
+                                row_id=row_id,
+                                new_pct=pct,
+                            )
                         last_update_time = current_time
 
     except HTTPError:
-        logger.log_message(
-            f"download_file() HTTP error while downloading {url} to {temp_filepath}",  # NOQA: E501
-            0,
+        logger.error(
+            'download_file() HTTP error while downloading '
+            f'{url} to {temp_filepath}',
         )
-        set_status_downloaded_by_id(row_id=row_id, new_status='connection_failed')  # NOQA: E501
+        set_status_downloaded_by_id(
+            row_id=row_id,
+            new_status='connection_failed',
+        )
         return
     except RequestException:
-        logger.log_message(
-            f"download_file() Connection error while downloading {url} to {temp_filepath}",  # NOQA: E501
-            0,
+        logger.error(
+            'download_file() Connection error while downloading '
+            f'{url} to {temp_filepath}',
         )
-        set_status_downloaded_by_id(row_id=row_id, new_status='connection_failed')  # NOQA: E501
+        set_status_downloaded_by_id(
+            row_id=row_id,
+            new_status='connection_failed',
+        )
         return
     except OSError as e:
-        logger.log_message(
-            f"download_file() File I/O error while writing {temp_filepath}: {e}",  # NOQA: E501
-            0,
+        logger.error(
+            'download_file() File I/O error while writing '
+            f'{temp_filepath}: {e}',
         )
         set_status_downloaded_by_id(row_id=row_id, new_status='failed')
         return
 
-    # Validate final size (if known)
     final_size = temp_filepath.stat().st_size
     if total_size is None:
-        # We can't verify length, but download ended cleanly.
-        logger.log_message(
-            f"download_file() Download finished (unknown expected size) for {url} to {temp_filepath}",  # NOQA: E501
-            1,
+        logger.warning(
+            'download_file() Download finished '
+            f'(unknown expected size) for {url} to {temp_filepath}',
         )
         temp_filepath.replace(final_filepath)
         delete_by_id(row_id)
         return
 
     if final_size == total_size:
-        logger.log_message(
-            f"download_file() Download successful for {url} to {temp_filepath}",  # NOQA: E501
-            1,
+        logger.warning(
+            'download_file() Download successful for '
+            f'{url} to {temp_filepath}',
         )
         temp_filepath.replace(final_filepath)
         delete_by_id(row_id)
     else:
-        logger.log_message(
-            f"download_file() Sizes don't match for {url}. Expected {total_size}, got {final_size}.",  # NOQA: E501
-            0,
+        logger.error(
+            "download_file() Sizes don't match for "
+            f'{url}. Expected {total_size}, got {final_size}.',
         )
         set_status_downloaded_by_id(row_id=row_id, new_status='failed')
 
@@ -355,17 +404,18 @@ def check_token(token: str) -> bool:
     result, payload = api_post(url, data=data, headers=headers)
     if result == 'Connection failed':
         message = 'check_token() Connection failed'
-        logger.log_message(message, 0)
+        logger.error(message)
         return False
+
     root = ET.fromstring(payload)
     status = root.find('status')
-    if isinstance(status, ET.Element):
-        if status.text == 'OK':
-            message = f"check_token() Token is valid: {token}"
-            logger.log_message(message, 2)
-            return True
-    message = f"check_token() Token is invalid: {token}"
-    logger.log_message(message, 1)
+    if isinstance(status, ET.Element) and status.text == 'OK':
+        message = f'check_token() Token is valid: {token}'
+        logger.info(message)
+        return True
+
+    message = f'check_token() Token is invalid: {token}'
+    logger.warning(message)
     return False
 
 
@@ -378,42 +428,40 @@ def get_queue(token: str) -> tuple[str, list[dict] | None]:
     result, payload = api_post(url, data=data, headers=headers)
     if result == 'Connection failed':
         message = 'get_queue() Connection failed'
-        logger.log_message(message, 0)
+        logger.error(message)
         return ('Connection failed', None)
+
     root = ET.fromstring(payload)
     status = root.find('status')
-    if isinstance(status, ET.Element):
-        if status.text == 'OK':
+    if isinstance(status, ET.Element) and status.text == 'OK':
 
-            class ResponseDict(TypedDict):
-                status: str | None
-                total: str | None
-                files: list[dict]
+        class ResponseDict(TypedDict):
+            status: str | None
+            total: str | None
+            files: list[dict]
 
-            response_dict: ResponseDict = {
-                'status': root.findtext('status'),
-                'total': root.findtext('total'),
-                'files': [],
+        response_dict: ResponseDict = {
+            'status': root.findtext('status'),
+            'total': root.findtext('total'),
+            'files': [],
+        }
+
+        for file_elem in root.findall('file'):
+            file_info: dict[str, str | None] = {
+                child.tag: child.text for child in file_elem
             }
+            response_dict['files'].append(file_info)
 
-            for file_elem in root.findall('file'):
-                file_info: dict[str, str | None] = {child.tag: child.text for child in file_elem}  # NOQA: E501
-                response_dict['files'].append(file_info)
-            message = f"get_queue() Retrieved queue with {len(response_dict['files'])} files"  # NOQA: E501
-            logger.log_message(message, 2)
-            return ('OK', response_dict['files'])
+        message = (
+            'get_queue() Retrieved queue with '
+            f"{len(response_dict['files'])} files"
+        )
+        logger.info(message)
+        return ('OK', response_dict['files'])
+
     message = 'get_queue() Failed to retrieve queue'
-    logger.log_message(message, 1)
+    logger.warning(message)
     return ('Not found', None)
-    # Example entry:
-    #     {'downloaded': '0',
-    #   'ident': 'KkYrWqGcFl',
-    #   'img': 'https://img.webshare.cz/static/xxx.jpg',
-    #   'name': 'xxxxxxx.mkv',
-    #   'password': '0',
-    #   'size': '1155405256',
-    #   'stripe': 'https://img.webshare.cz/static/xxx.jpg',
-    #   'stripe_count': '10'}
 
 
 def get_download_link(token: str, file_id: str) -> tuple[str, str | None]:
@@ -425,30 +473,44 @@ def get_download_link(token: str, file_id: str) -> tuple[str, str | None]:
     }
     result, payload = api_post(url, data=data, headers=headers)
     if result == 'Connection failed':
-        message = f"get_download_link() Connection failed for {file_id=}"  # NOQA: E501
-        logger.log_message(message, 0)
+        message = (
+            'get_download_link() Connection '
+            f'failed for file_id={file_id}'
+        )
+        logger.error(message)
         return ('Connection failed', None)
+
     root = ET.fromstring(payload)
     status = root.find('status')
     if isinstance(status, ET.Element):
         if status.text == 'OK':
-            message = f"get_download_link() Retrieved download link for {file_id=}"  # NOQA: E501
-            logger.log_message(message, 2)
+            message = (
+                'get_download_link() Retrieved download link for '
+                f'file_id={file_id}'
+            )
+            logger.info(message)
             link = root.find('link')
             if isinstance(link, ET.Element):
                 return ('OK', link.text)
-        elif status.text == 'FATAL':
-            message = f"get_download_link() Fatal error for {file_id=}"
-            logger.log_message(message, 0)
+
+        if status.text == 'FATAL':
+            message = f'get_download_link() Fatal error for file_id={file_id}'
+            logger.error(message)
             message_elem = root.find('message')
             if isinstance(message_elem, ET.Element) and message_elem.text:
-                # <response><status>FATAL</status><code>FILE_LINK_FATAL_4</code><message>File temporarily unavailable.</message><app_version>30</app_version></response>  # NOQA: E501
                 if message_elem.text == 'File temporarily unavailable.':
-                    message = f"get_download_link() File temporarily unavailable for {file_id=} raw payload: {payload}"  # NOQA: E501
-                    logger.log_message(message, 2)
+                    message = (
+                        'get_download_link() File temporarily unavailable for '
+                        f'file_id={file_id}, raw payload: {payload}'
+                    )
+                    logger.info(message)
                     return ('Temporary unavailable', None)
-    message = f"get_download_link() Failed to retrieve download link for {file_id=}"  # NOQA: E501
-    logger.log_message(message, 1)
+
+    message = (
+        'get_download_link() Failed to retrieve download link for '
+        f'file_id={file_id}'
+    )
+    logger.warning(message)
     return ('Not found', None)
 
 
@@ -461,48 +523,55 @@ def dequeue_file(token: str, file_id) -> str | None:
     }
     result, payload = api_post(url, data=data, headers=headers)
     if result == 'Connection failed':
-        message = f"dequeue_file() Connection failed for {file_id=}"
-        logger.log_message(message, 0)
+        message = f'dequeue_file() Connection failed for file_id={file_id}'
+        logger.error(message)
         return None
+
     root = ET.fromstring(payload)
     status = root.find('status')
-    if isinstance(status, ET.Element):
-        if status.text == 'OK':
-            message = f"dequeue_file() Successfully dequeued {file_id=}"
-            logger.log_message(message, 2)
-            return status.text
+    if isinstance(status, ET.Element) and status.text == 'OK':
+        message = f'dequeue_file() Successfully dequeued file_id={file_id}'
+        logger.info(message)
+        return status.text
+
     return None
 
 
 def add_link_if_new(link_raw: str) -> tuple[bool, str]:
     url = (link_raw or '').strip()
     if not url:
-        message = f"add_link_if_new() Invalid URL: {link_raw}"
-        logger.log_message(message, 1)
+        message = f'add_link_if_new() Invalid URL: {link_raw}'
+        logger.warning(message)
         return (False, '')
+
     db = get_db()
     try:
         cur = db.execute(
-            'INSERT OR IGNORE INTO links (url) VALUES (?)', (url,),
+            'INSERT OR IGNORE INTO links (url) VALUES (?)',
+            (url,),
         )
         db.commit()
-        added = cur.rowcount > 0  # 1 if inserted, 0 if ignored (duplicate)
+        added = cur.rowcount > 0
         if added:
-            message = f"add_link_if_new() Added new link to DB: {url}"
-            logger.log_message(message, 2)
+            message = f'add_link_if_new() Added new link to DB: {url}'
+            logger.info(message)
         else:
-            message = f"add_link_if_new() Link already exists in DB, not added: {url}"  # NOQA: E501
-            logger.log_message(message, 2)
+            message = (
+                'add_link_if_new() Link already exists in DB, '
+                f'not added: {url}'
+            )
+            logger.info(message)
         return (added, url)
     except sqlite3.Error:
-        # For robustness; in a simple app we just surface a generic failure
-        message = f"add_link_if_new() Database error while adding link: {url}"
-        logger.log_message(message, 0)
+        message = (
+            'add_link_if_new() Database error while adding '
+            f'link: {url}'
+        )
+        logger.error(message)
         return (False, url)
 
 
 def main_loop() -> None:
-    # check the WS download list
     settings = get_settings()
     if settings['auto_download'] == 1:
         token = settings['token']
@@ -514,24 +583,29 @@ def main_loop() -> None:
                     file_name = file['name']
                     _, link = get_download_link(token, file_id)
                     if link:
-                        message = f"main_loop() Retrieved download link for {file_id=}, {file_name=} and adding it to the local queue"  # NOQA: E501
-                        logger.log_message(message, 1)
-                        add_status, url = add_link_if_new(link)
+                        message = (
+                            'main_loop() Retrieved download link for '
+                            f'file_id={file_id}, file_name={file_name} '
+                            'and adding it to the local queue'
+                        )
+                        logger.warning(message)
+                        add_status, _ = add_link_if_new(link)
                         if add_status:
                             dequeue_file(token, file_id)
                     else:
-                        message = f"main_loop() Failed to retrieve download link for {file_id=}, {file_name=}"  # NOQA: E501
-                        logger.log_message(message, 1)
+                        message = (
+                            'main_loop() Failed to retrieve download link for '
+                            f'file_id={file_id}, file_name={file_name}'
+                        )
+                        logger.warning(message)
             else:
                 message = 'main_loop() No files in WS queue'
-                logger.log_message(message, 2)
-                pass
+                logger.info(message)
 
-    # process links from DB
     row = fetch_oldest()
     if not row:
         message = 'main_loop() No links to process. DB is empty.'
-        logger.log_message(message, 2)
+        logger.info(message)
         sleep(10)
         return
 
@@ -540,14 +614,20 @@ def main_loop() -> None:
 
     response = requests.head(url)
     if response.status_code == 200:
-        message = f"main_loop() Valid link found for {row_id=}, {url=}"
-        logger.log_message(message, 2)
+        message = (
+            'main_loop() Valid link '
+            f'found for row_id={row_id}, url={url}'
+        )
+        logger.info(message)
         file_size = int(response.headers['Content-Length'])
         set_file_size_by_id(row_id, file_size)
         download_file(url, row_id)
     else:
-        message = f"main_loop() Invalid link or connection not working for {row_id=}, {url=}"  # NOQA: E501
-        logger.log_message(message, 1)
+        message = (
+            'main_loop() Invalid link or connection not working for '
+            f'row_id={row_id}, url={url}'
+        )
+        logger.warning(message)
         sleep(10)
 
 
