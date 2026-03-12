@@ -294,6 +294,10 @@ def check_token(token: str) -> bool:
     data = {
         'wst': token,
     }
+    if len(token) < 1:
+        message = 'No token is set - user is not logged in.'
+        logger.info(message)
+        return False
     _, payload = api_post(url, data=data, headers=headers)
     root = ET.fromstring(payload)
     status = root.find('status')
@@ -302,7 +306,7 @@ def check_token(token: str) -> bool:
             message = 'check_token() OK'
             logger.info(message)
             return True
-    message = 'check_token() failed - are you logged in?'
+    message = 'check_token() failed'
     logger.error(message)
     return False
 

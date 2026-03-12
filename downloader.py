@@ -401,6 +401,10 @@ def check_token(token: str) -> bool:
     data = {
         'wst': token,
     }
+    if len(token) < 1:
+        message = 'No token is set - user is not logged in.'
+        logger.info(message)
+        return False
     result, payload = api_post(url, data=data, headers=headers)
     if result == 'Connection failed':
         message = 'check_token() Connection failed'
