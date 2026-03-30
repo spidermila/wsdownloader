@@ -480,13 +480,17 @@ def get_download_link(token: str, file_id: str) -> tuple[str, str | None]:
                 f'get_download_link() Fatal error for file_id={file_id}',
             )
             message_elem = root.find('message')
+            error_msg = ''
             if isinstance(message_elem, ET.Element) and message_elem.text:
+                error_msg = message_elem.text
                 if message_elem.text == 'File temporarily unavailable.':
                     logger.info(
                         f'get_download_link() File temporarily unavailable '
                         f'for file_id={file_id}, raw payload: {payload}',
                     )
                     return ('Temporary unavailable', None)
+            # Return error message as second element for Fatal errors
+            return ('Fatal error', error_msg if error_msg else None)
 
     logger.warning(
         'get_download_link() Failed to retrieve download link for '
@@ -547,6 +551,39 @@ def add_link_if_new(link_raw: str) -> tuple[bool, str]:
         return (False, url)
 
 
+def log_download_error(
+    file_id: str,
+    file_name: str,
+    error_type: str,
+    error_message: str = '',
+) -> bool:
+    """Log a download error to the database for user notification."""
+    db = get_db()
+    try:
+        cur = db.execute(
+            """
+            INSERT INTO download_errors
+                (file_id, file_name, error_type, error_message)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(file_id) DO UPDATE SET
+                error_type = excluded.error_type,
+                error_message = excluded.error_message,
+                created_at = CURRENT_TIMESTAMP
+            """,
+            (file_id, file_name, error_type, error_message),
+        )
+        db.commit()
+        db.close()
+        logger.info(
+            f'log_download_error() Logged error for file_id={file_id}, '
+            f'error_type={error_type}',
+        )
+        return cur.rowcount > 0
+    except sqlite3.Error as e:
+        logger.error(f'log_download_error() Database error: {e}')
+        return False
+
+
 def main_loop() -> None:
     settings = get_settings()
     if settings['auto_download'] == 1:
@@ -557,20 +594,26 @@ def main_loop() -> None:
                 for file in queue:
                     file_id = file['ident']
                     file_name = file['name']
-                    _, link = get_download_link(token, file_id)
+                    result, link = get_download_link(token, file_id)
                     if link:
-                        logger.warning(
+                        logger.info(
                             'main_loop() Retrieved download link for '
-                            f'file_id={file_id}, file_name={file_name} '
-                            'and adding it to the local queue',
+                            f'file_id={file_id}, file_name={file_name}',
                         )
                         add_status, _ = add_link_if_new(link)
                         if add_status:
                             dequeue_file(token, file_id)
                     else:
                         logger.warning(
-                            'main_loop() Failed to retrieve download link for '
-                            f'file_id={file_id}, file_name={file_name}',
+                            'main_loop() Failed to retrieve download link '
+                            f'for file_id={file_id}, file_name={file_name}',
+                        )
+                        error_msg = link if result == 'Fatal error' else ''
+                        log_download_error(
+                            file_id=file_id,
+                            file_name=file_name,
+                            error_type=result,
+                            error_message=error_msg or '',
                         )
             else:
                 logger.info('main_loop() No files in WS queue')
