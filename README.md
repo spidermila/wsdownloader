@@ -7,6 +7,8 @@
 docker pull spidermila/wsdownloader
 ```
 
+[Changelog](changelog.md)
+
 # CZ readme
 Find the ENG readme section below
 
