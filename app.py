@@ -830,6 +830,98 @@ def delete_file():
     return redirect(url_for('index'))
 
 
+@app.route('/rename-file', methods=['POST'])
+def rename_file():
+    """Rename a file in the downloads directory."""
+    old_name = (request.form.get('old_name') or '').strip()
+    new_name = (request.form.get('new_name') or '').strip()
+
+    if not old_name or not new_name:
+        logger.error('rename_file() Missing old_name or new_name')
+        return jsonify({
+            'success': False,
+            'error': 'Chybí název souboru.',
+        }), 400
+
+    # Validate new filename
+    if '/' in new_name or '\\' in new_name:
+        logger.error(
+            f'rename_file() Path separator in filename: {new_name}',
+        )
+        return jsonify({
+            'success': False,
+            'error': 'Neplatný název souboru.',
+        }), 400
+
+    if new_name.startswith('.'):
+        logger.error(f'rename_file() Hidden file not allowed: {new_name}')
+        return jsonify({
+            'success': False,
+            'error': 'Neplatný název souboru.',
+        }), 400
+
+    # Remove dangerous characters
+    if '\x00' in new_name or '\n' in new_name or '\r' in new_name:
+        logger.error('rename_file() Invalid characters in filename')
+        return jsonify({
+            'success': False,
+            'error': 'Neplatný název souboru.',
+        }), 400
+
+    try:
+        root = DOWNLOADS_PATH.resolve()
+        old_path = (root / old_name).resolve()
+        new_path = (root / new_name).resolve()
+
+        # Security check: ensure paths are within downloads directory
+        if not str(old_path).startswith(str(root) + os.sep):
+            logger.error(f'rename_file() Invalid old path: {old_path}')
+            return jsonify({
+                'success': False,
+                'error': 'Neplatná cesta.',
+            }), 400
+
+        if not str(new_path).startswith(str(root) + os.sep):
+            logger.error(f'rename_file() Invalid new path: {new_path}')
+            return jsonify({
+                'success': False,
+                'error': 'Neplatná cesta.',
+            }), 400
+
+        if not old_path.exists() or not old_path.is_file():
+            logger.warning(f'rename_file() File not found: {old_path}')
+            return jsonify({
+                'success': False,
+                'error': 'Soubor nenalezen.',
+            }), 404
+
+        if new_path.exists():
+            logger.warning(f'rename_file() Target file exists: {new_path}')
+            return jsonify({
+                'success': False,
+                'error': 'Soubor s tímto názvem již existuje.',
+            }), 409
+
+        old_path.rename(new_path)
+        logger.info(f'rename_file() Renamed: {old_name} -> {new_name}')
+        socketio.emit(
+            'file_renamed', {
+                'old_name': old_name,
+                'new_name': new_name,
+            },
+        )
+        return jsonify({'success': True, 'new_name': new_name})
+
+    except Exception as e:
+        logger.error(
+            f'rename_file() Error renaming {old_name} to {new_name}: {e}',
+        )
+        return jsonify({
+            'success': False,
+            'error': 'Chyba při přejmenování.',
+        }), 500
+
+
 @app.post('/settings/auto-download')
 def update_auto_download():
     raw = request.form.get('auto_download')

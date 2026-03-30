@@ -311,10 +311,15 @@
             </thead>
             <tbody id="files-tbody">
               {% for f in files %}
-                <tr>
-                  <td class="fw-semibold text-break col-filename">{{ f.name }}</td>
+                <tr data-filename="{{ f.name }}">
+                  <td class="fw-semibold text-break col-filename">
+                    <span class="filename-display">{{ f.name }}</span>
+                  </td>
                   <td class="d-none d-sm-table-cell">{{ f.size }}</td>
-                  <td>
+                  <td class="actions-cell">
+                    <button type="button" class="btn btn-sm btn-outline-secondary me-1" onclick="startRename(this)" aria-label="Přejmenovat {{ f.name }}">
+                      Přejmenovat
+                    </button>
                     <form method="post" action="{{ url_for('delete_file') }}" class="d-inline">
                       <input type="hidden" name="filename" value="{{ f.name }}">
                       <button type="submit" class="btn btn-sm btn-danger" aria-label="Odstranit {{ f.name }}">
@@ -340,6 +345,9 @@
 
     const fsProgress = document.getElementById('fs-progress');
     const fsText = document.getElementById('fs-text');
+
+    // Track if user is currently renaming a file
+    let isRenaming = false;
 
     function renderLinks(links) {
       const container = document.getElementById('links-container');
@@ -389,6 +397,9 @@
     }
 
     function renderFiles(files) {
+      // Don't re-render while user is editing a filename
+      if (isRenaming) return;
+
       const container = document.getElementById('files-container');
       if (!container) return;
 
@@ -417,9 +428,14 @@
         const tr = document.createElement('tr');
         tr.dataset.filename = f.name;
         tr.innerHTML = `
-          <td class="fw-semibold text-break col-filename">${f.name}</td>
+          <td class="fw-semibold text-break col-filename">
+            <span class="filename-display">${f.name}</span>
+          </td>
           <td class="d-none d-sm-table-cell">${f.size}</td>
-          <td>
+          <td class="actions-cell">
+            <button type="button" class="btn btn-sm btn-outline-secondary me-1" onclick="startRename(this)" aria-label="Přejmenovat ${f.name}">
+              Přejmenovat
+            </button>
             <form method="post" action="{{ url_for('delete_file') }}" class="d-inline">
               <input type="hidden" name="filename" value="${f.name}">
               <button type="submit" class="btn btn-sm btn-danger" aria-label="Odstranit ${f.name}">
@@ -549,6 +565,166 @@
         }, 300);
       }, timeout);
     });
+
+    // Rename functionality
+    function startRename(btn) {
+      const tr = btn.closest('tr');
+
+      // Check if this row is already being edited
+      if (tr.querySelector('.rename-input')) {
+        return;
+      }
+
+      const originalName = tr.dataset.filename;
+      const filenameCell = tr.querySelector('.col-filename');
+      const actionsCell = tr.querySelector('.actions-cell');
+
+      // Mark this row as being edited
+      tr.dataset.editing = 'true';
+      updateRenamingState();
+
+      // Replace filename display with input
+      const escapedName = originalName
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;');
+      filenameCell.innerHTML = `
+        <input type="text"
+               class="form-control form-control-sm rename-input"
+               value="${escapedName}">
+      `;
+
+      // Replace actions with OK/Cancel buttons
+      actionsCell.innerHTML = `
+        <button type="button"
+                class="btn btn-sm btn-success me-1 rename-ok-btn">
+          OK
+        </button>
+        <button type="button"
+                class="btn btn-sm btn-secondary rename-cancel-btn">
+          Zrušit
+        </button>
+      `;
+
+      // Get references to new elements
+      const input = filenameCell.querySelector('.rename-input');
+      const okBtn = actionsCell.querySelector('.rename-ok-btn');
+      const cancelBtn = actionsCell.querySelector('.rename-cancel-btn');
+
+      // Add click handlers
+      okBtn.onclick = () => confirmRename(tr, originalName);
+      cancelBtn.onclick = () => cancelRename(tr, originalName);
+
+      // Focus the input and select filename without extension
+      input.focus();
+      const dotIndex = originalName.lastIndexOf('.');
+      if (dotIndex > 0) {
+        input.setSelectionRange(0, dotIndex);
+      } else {
+        input.select();
+      }
+
+      // Add keyboard support
+      input.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          confirmRename(tr, originalName);
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          cancelRename(tr, originalName);
+        }
+      });
+    }
+
+    function confirmRename(tr, originalName) {
+      const input = tr.querySelector('.rename-input');
+      const newName = input.value.trim();
+
+      // If name hasn't changed, just cancel
+      if (newName === originalName || !newName) {
+        cancelRename(tr, originalName);
+        return;
+      }
+
+      // Disable buttons during request
+      const okBtn = tr.querySelector('.rename-ok-btn');
+      const cancelBtn = tr.querySelector('.rename-cancel-btn');
+      okBtn.disabled = true;
+      cancelBtn.disabled = true;
+      input.disabled = true;
+
+      // Send rename request
+      const formData = new FormData();
+      formData.append('old_name', originalName);
+      formData.append('new_name', newName);
+
+      fetch('/rename-file', {
+        method: 'POST',
+        body: formData
+      })
+      .then(response => response.json())
+      .then(data => {
+        if (data.success) {
+          tr.dataset.filename = data.new_name;
+          restoreRow(tr, data.new_name);
+        } else {
+          alert(data.error || 'Chyba při přejmenování.');
+          okBtn.disabled = false;
+          cancelBtn.disabled = false;
+          input.disabled = false;
+          input.focus();
+        }
+      })
+      .catch(err => {
+        console.error('Rename error:', err);
+        alert('Chyba při přejmenování.');
+        okBtn.disabled = false;
+        cancelBtn.disabled = false;
+        input.disabled = false;
+      });
+    }
+
+    function cancelRename(tr, originalName) {
+      restoreRow(tr, originalName);
+    }
+
+    function restoreRow(tr, filename) {
+      delete tr.dataset.editing;
+      updateRenamingState();
+
+      const filenameCell = tr.querySelector('.col-filename');
+      const actionsCell = tr.querySelector('.actions-cell');
+
+      const escapedName = filename
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;');
+
+      filenameCell.innerHTML =
+        `<span class="filename-display">${escapedName}</span>`;
+
+      actionsCell.innerHTML = `
+        <button type="button"
+                class="btn btn-sm btn-outline-secondary me-1"
+                onclick="startRename(this)"
+                aria-label="Přejmenovat ${escapedName}">
+          Přejmenovat
+        </button>
+        <form method="post"
+              action="{{ url_for('delete_file') }}"
+              class="d-inline">
+          <input type="hidden" name="filename" value="${escapedName}">
+          <button type="submit"
+                  class="btn btn-sm btn-danger"
+                  aria-label="Odstranit ${escapedName}">
+            Smazat
+          </button>
+        </form>
+      `;
+    }
+
+    function updateRenamingState() {
+      const editingRows = document.querySelectorAll('tr[data-editing="true"]');
+      isRenaming = editingRows.length > 0;
+    }
   </script>
 </body>
 </html>
