@@ -97,7 +97,7 @@ class Link:
             _purl = Path(urlparse(url=self.url).path)
             return _purl.name
         except:  # NOQA: E722
-            logger.error(f'unable to extract file name from url {self.url}=')
+            logger.error('unable to extract file name from url %s', self.url)
             raise
 
     def get_human_size(self) -> str:
@@ -212,7 +212,7 @@ def save_credentials(user_name: str, password: str) -> bool:
         return False
     salt = get_salt(user_name)
     if salt is None:
-        logger.error(f'Failed to get salt for user {user_name}')
+        logger.error('Failed to get salt for user %s', user_name)
         return False
     password_hash = hashlib.sha1(
         md5_crypt.hash(password, salt=salt).encode('utf-8'),
@@ -234,12 +234,13 @@ def api_post(url: str | bytes, data: dict, headers: dict) -> tuple[str, str]:
         response = requests.post(url, data=data, headers=headers)
     except ConnectionError as e:
         logger.error(
-            f'Connection failed {e.strerror=}, {e.errno=}, {e.filename=}',
+            'Connection failed strerror=%s, errno=%s, filename=%s',
+            e.strerror, e.errno, e.filename,
         )
         return ('Connection failed', '<dummy></dummy>')
     rc = response.status_code
     if rc != 200:
-        logger.error(f'Got RC: {rc}, {response.text=}')
+        logger.error('Got RC: %d, response.text=%r', rc, response.text)
         return ('Connection failed', '<dummy></dummy>')
     return ('OK', response.text)
 
@@ -349,12 +350,12 @@ def validate_url(url) -> str:
     allowed_schemes = {'http', 'https'}
     if allowed_schemes is not None and p.scheme.lower() not in allowed_schemes:
         logger.error(
-            f"Invalid URL scheme: {p.scheme}, allowed: {allowed_schemes}",
+            'Invalid URL scheme: %s, allowed: %s', p.scheme, allowed_schemes,
         )
         return 'Neplatný link.'
 
     if p.port is not None and not (0 <= p.port <= 65535):
-        logger.error(f"Invalid URL port: {p.port}")
+        logger.error('Invalid URL port: %s', p.port)
         return 'Neplatný link.'
 
     host = p.hostname or ''
@@ -364,18 +365,18 @@ def validate_url(url) -> str:
     ):
         parts = [int(x) for x in host.split('.')]
         if any(not (0 <= x <= 255) for x in parts):
-            logger.error(f"Invalid IPv4 address: {host}")
+            logger.error('Invalid IPv4 address: %s', host)
             return 'Neplatný link.'
-    logger.info(f"URL validated successfully: {url}")
+    logger.info('URL validated successfully: %s', url)
     return 'ok'
 
 
 def test_url(url: str) -> bool:
     response = requests.head(url)
     if response.status_code == 200:
-        logger.info(f"URL test succeeded: {url}")
+        logger.info('URL test succeeded: %s', url)
         return True
-    logger.info(f"URL test failed: {url}")
+    logger.info('URL test failed: %s', url)
     return False
 
 
@@ -392,12 +393,12 @@ def add_link_if_new(link_raw: str) -> tuple[bool, str]:
         db.commit()
         added = cur.rowcount > 0
         if added:
-            logger.info(f'add_link_if_new() Link added: {url}')
+            logger.info('add_link_if_new() Link added: %s', url)
         else:
-            logger.warning(f'add_link_if_new() Link already exists: {url}')
+            logger.warning('add_link_if_new() Link already exists: %s', url)
         return (added, url)
     except sqlite3.Error:
-        logger.error(f"add_link_if_new() Error adding link: {url}")
+        logger.error('add_link_if_new() Error adding link: %s', url)
         return (False, url)
 
 
@@ -430,7 +431,7 @@ def get_fs_usage(base_path: Optional[Path] = None) -> dict:
         }
     except Exception as e:
         logger.error(
-            f'get_fs_usage() Error getting fs usage for {base_path}: {e}',
+            'get_fs_usage() Error getting fs usage for %s: %s', base_path, e,
         )
         return {
             'total': 0, 'used': 0, 'free': 0,
@@ -455,8 +456,8 @@ def list_downloaded_files() -> list[dict]:
                 })
     except Exception as e:
         logger.error(
-            f'list_downloaded_files() Error listing files in '
-            f'{DOWNLOADS_PATH}: {e}',
+            'list_downloaded_files() Error listing files in %s: %s',
+            DOWNLOADS_PATH, e,
         )
     return files
 
@@ -491,7 +492,7 @@ def get_db_state_hash() -> str:
         return hashlib.md5(state_str.encode()).hexdigest()
     except Exception as e:
         logger.error(
-            f"get_db_state_hash() Error computing state hash: {e}",
+            'get_db_state_hash() Error computing state hash: %s', e,
         )
         return ''
 
@@ -541,12 +542,12 @@ def monitor_database_changes():
                 )
                 logger.info(
                     'monitor_database_changes() Emitted update: '
-                    f"{len(links)} links, {len(files)} files",
+                    '%d links, %d files', len(links), len(files),
                 )
 
         except Exception as e:
             logger.error(
-                f'monitor_database_changes() Error in monitor thread: {e}',
+                'monitor_database_changes() Error in monitor thread: %s', e,
             )
             import traceback
             traceback.print_exc()
@@ -589,20 +590,21 @@ def index():
 
         if val_message == 'ok' and not test_url(url_input):
             message = 'Link nedostupný'
-            logger.error(f"index() {message}, input was: {url_input}")
+            logger.error('index() %s, input was: %s', message, url_input)
             flash(message, 'error')
         elif val_message != 'ok':
-            message = f"index() URL validation failed, input was: {url_input}"
-            logger.error(message)
-            flash(message, 'error')
+            logger.error(
+                'index() URL validation failed, input was: %s', url_input,
+            )
+            flash(val_message, 'error')
         else:
             added, value = add_link_if_new(url_input)
             if added:
-                logger.info(f"index() Link added: {value}")
+                logger.info('index() Link added: %s', value)
                 flash(f"Přidáno: {value}", 'success')
                 socketio.emit('link_added', link_to_dict(Link(value)))
             else:
-                logger.info(f"index() Link already exists: {value}")
+                logger.info('index() Link already exists: %s', value)
                 flash(f"Již existuje: {value}", 'warning')
         return redirect(url_for('index'))
 
@@ -651,19 +653,19 @@ def save_login():
 
     if not save_credentials(user_name, password):
         logger.error(
-            f'save_login() Failed to save credentials for user {user_name}',
+            'save_login() Failed to save credentials for user %s', user_name,
         )
         flash('Přihlášení selhalo', 'error')
         return redirect(url_for('index'))
     token = login_and_get_token()
     if not token:
         logger.error(
-            f'save_login() Failed to obtain token for user {user_name}',
+            'save_login() Failed to obtain token for user %s', user_name,
         )
         flash('Přihlášení selhalo', 'error')
         return redirect(url_for('index'))
     save_token_value(token)
-    logger.info(f'save_login() User {user_name} logged in successfully')
+    logger.info('save_login() User %s logged in successfully', user_name)
     flash('Úspěšné přihlášení', 'success')
     return redirect(url_for('index'))
 
@@ -689,8 +691,7 @@ def logout():
 def delete_link():
     url_to_delete = (request.form.get('url') or '').strip()
     if not url_to_delete:
-        message = 'delete_link() No URL provided'
-        logger.error(message)
+        logger.error('delete_link() No URL provided')
         flash('Žádná URL poskytnuta.', 'error')
         return redirect(url_for('index'))
 
@@ -699,11 +700,11 @@ def delete_link():
     db.commit()
 
     if cur.rowcount > 0:
-        logger.info(f'delete_link() Link deleted: {url_to_delete}')
+        logger.info('delete_link() Link deleted: %s', url_to_delete)
         flash(f"Odstraněno: {url_to_delete}", 'success')
         socketio.emit('link_deleted', {'url': url_to_delete})
     else:
-        logger.warning(f'delete_link() Link not found: {url_to_delete}')
+        logger.warning('delete_link() Link not found: %s', url_to_delete)
         flash(f"Nenalezeno: {url_to_delete}", 'error')
     return redirect(url_for('index'))
 
@@ -722,22 +723,22 @@ def delete_file():
 
         if not str(candidate).startswith(str(root) + os.sep):
             logger.error(
-                'delete_file() Invalid file path: '
-                f'{candidate} is outside of {root}',
+                'delete_file() Invalid file path: %s is outside of %s',
+                candidate, root,
             )
             flash('Neplatná cesta k souboru.', 'error')
             return redirect(url_for('index'))
 
         if candidate.exists() and candidate.is_file():
             candidate.unlink()
-            logger.info(f'delete_file() File deleted: {candidate}')
+            logger.info('delete_file() File deleted: %s', candidate)
             flash(f"Odstraněn soubor: {filename}", 'success')
             socketio.emit('file_deleted', {'filename': filename})
         else:
-            logger.warning(f'delete_file() File not found: {candidate}')
+            logger.warning('delete_file() File not found: %s', candidate)
             flash(f"Soubor nenalezen: {filename}", 'error')
     except Exception as e:
-        logger.error(f"delete_file() Error deleting file {filename}: {e}")
+        logger.error('delete_file() Error deleting file %s: %s', filename, e)
         flash(f"Chyba při odstraňování souboru: {filename}", 'error')
 
     return redirect(url_for('index'))
@@ -755,8 +756,8 @@ def update_auto_download():
     )
     db.commit()
     logger.info(
-        'update_auto_download() Auto-download '
-        f'{"enabled" if enabled else "disabled"}',
+        'update_auto_download() Auto-download %s',
+        'enabled' if enabled else 'disabled',
     )
     flash(
         f'Automatické stahování {"zapnuto" if enabled else "vypnuto"}.',
@@ -772,8 +773,8 @@ def update_dark_mode():
     db.execute('UPDATE settings SET dark_mode = ? WHERE id = 1', (dark_mode,))
     db.commit()
     logger.info(
-        'update_dark_mode() Dark mode '
-        f'{"enabled" if dark_mode else "disabled"}',
+        'update_dark_mode() Dark mode %s',
+        'enabled' if dark_mode else 'disabled',
     )
     return redirect(url_for('index'))
 
