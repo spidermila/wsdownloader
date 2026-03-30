@@ -146,6 +146,20 @@ def init_db() -> None:
         """)
         conn.execute('INSERT OR IGNORE INTO settings (id) VALUES (1)')
 
+        # New errors table for tracking download errors
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS download_errors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                error_type TEXT NOT NULL,
+                error_message TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                retry_count INTEGER DEFAULT 0,
+                UNIQUE(file_id)
+            )
+        """)
+
         cursor = conn.execute('PRAGMA table_info(settings)')
         columns = [row[1] for row in cursor.fetchall()]
         if 'dark_mode' not in columns:
@@ -300,6 +314,31 @@ def check_token(token: str) -> bool:
     return False
 
 
+def dequeue_file(token: str, file_id: str) -> str | None:
+    """Remove a file from the Webshare download queue."""
+    headers = {'Accept': 'text/xml; charset=UTF-8'}
+    url = BASE_URL + 'dequeue_file/'
+    data = {
+        'ident': file_id,
+        'wst': token,
+    }
+    result, payload = api_post(url, data=data, headers=headers)
+    if result == 'Connection failed':
+        logger.error(
+            f'dequeue_file() Connection failed for file_id={file_id}',
+        )
+        return None
+
+    root = ET.fromstring(payload)
+    status = root.find('status')
+    if isinstance(status, ET.Element) and status.text == 'OK':
+        logger.info(f'dequeue_file() Successfully dequeued file_id={file_id}')
+        return status.text
+
+    logger.warning(f'dequeue_file() Failed to dequeue file_id={file_id}')
+    return None
+
+
 def read_links_from_db() -> list[Link]:
     db = get_db()
     rows = db.execute("""
@@ -317,6 +356,29 @@ def read_links_from_db() -> list[Link]:
         _link.size_bytes = row['size_bytes']
         links.append(_link)
     return links
+
+
+def read_download_errors() -> list[dict]:
+    """Read all download errors from the database."""
+    db = get_db()
+    rows = db.execute("""
+        SELECT id, file_id, file_name, error_type, error_message,
+               created_at
+        FROM download_errors
+        ORDER BY created_at DESC
+    """).fetchall()
+    return [dict(row) for row in rows]
+
+
+def delete_download_error(file_id: str) -> bool:
+    """Delete a download error by file_id."""
+    db = get_db()
+    cur = db.execute(
+        'DELETE FROM download_errors WHERE file_id = ?',
+        (file_id,),
+    )
+    db.commit()
+    return cur.rowcount > 0
 
 
 def validate_url(url) -> str:
@@ -471,6 +533,12 @@ def get_db_state_hash() -> str:
             SELECT url, status, pct_downloaded, size_bytes
             FROM links ORDER BY url
         """).fetchall()
+
+        # Also include errors in state hash
+        error_rows = conn.execute("""
+            SELECT file_id, error_type, retry_count
+            FROM download_errors ORDER BY file_id
+        """).fetchall()
         conn.close()
 
         state_parts = []
@@ -480,6 +548,13 @@ def get_db_state_hash() -> str:
                 f"{row['pct_downloaded']}:{row['size_bytes']}"
             )
             state_parts.append(state_part)
+
+        # Add errors to state
+        for row in error_rows:
+            state_parts.append(
+                f"err:{row['file_id']}:"
+                f"{row['error_type']}:{row['retry_count']}",
+            )
 
         if DOWNLOADS_PATH.exists():
             files = sorted([
@@ -520,6 +595,13 @@ def monitor_database_changes():
                     SELECT url, status, pct_downloaded, size_bytes
                     FROM links ORDER BY created_at DESC
                 """).fetchall()
+
+                # Also fetch errors
+                error_rows = conn.execute("""
+                    SELECT id, file_id, file_name, error_type, error_message,
+                           created_at, retry_count
+                    FROM download_errors ORDER BY created_at DESC
+                """).fetchall()
                 conn.close()
 
                 links = []
@@ -530,6 +612,7 @@ def monitor_database_changes():
                     link.size_bytes = row['size_bytes']
                     links.append(link_to_dict(link))
 
+                errors = [dict(row) for row in error_rows]
                 files = list_downloaded_files()
                 fs = get_fs_usage(DOWNLOADS_PATH)
 
@@ -538,6 +621,7 @@ def monitor_database_changes():
                         'links': links,
                         'files': files,
                         'fs': fs,
+                        'errors': errors,
                     },
                 )
                 logger.info(
@@ -611,6 +695,7 @@ def index():
     links = read_links_from_db()
     files = list_downloaded_files()
     fs = get_fs_usage(DOWNLOADS_PATH)
+    errors = read_download_errors()
 
     settings = get_settings()
     if not check_token(settings['token']):
@@ -623,6 +708,7 @@ def index():
         files=files,
         fs=fs,
         settings=settings,
+        errors=errors,
     )
 
 
@@ -785,6 +871,40 @@ def help_page():
     return render_template('help.html', settings=settings)
 
 
+@app.route('/error/dismiss', methods=['POST'])
+def dismiss_error():
+    """Dismiss/delete an error from the queue and dequeue from Webshare."""
+    file_id = (request.form.get('file_id') or '').strip()
+    if not file_id:
+        flash('Chybí ID souboru.', 'error')
+        return redirect(url_for('index'))
+
+    # First, try to dequeue from Webshare
+    settings = get_settings()
+    token = settings.get('token', '')
+    if token and check_token(token):
+        dequeue_result = dequeue_file(token, file_id)
+        if dequeue_result:
+            logger.info(
+                f'dismiss_error() Dequeued from Webshare: file_id={file_id}',
+            )
+        else:
+            logger.warning(
+                f'dismiss_error() Failed to dequeue: file_id={file_id}',
+            )
+
+    # Then delete from local errors table
+    if delete_download_error(file_id):
+        logger.info(f'dismiss_error() Dismissed error: file_id={file_id}')
+        flash('Soubor byl odstraněn z fronty.', 'success')
+        socketio.emit('error_dismissed', {'file_id': file_id})
+    else:
+        logger.warning(f'dismiss_error() Error not found: file_id={file_id}')
+        flash('Chyba nebyla nalezena.', 'error')
+
+    return redirect(url_for('index'))
+
+
 @socketio.on('connect')
 def handle_connect():
     """Send current state when client connects."""
@@ -792,11 +912,13 @@ def handle_connect():
     links = read_links_from_db()
     files = list_downloaded_files()
     fs = get_fs_usage(DOWNLOADS_PATH)
+    errors = read_download_errors()
     emit(
         'full_update', {
             'links': [link_to_dict(link) for link in links],
             'files': files,
             'fs': fs,
+            'errors': errors,
         },
     )
 
@@ -812,11 +934,13 @@ def handle_request_update():
     links = read_links_from_db()
     files = list_downloaded_files()
     fs = get_fs_usage(DOWNLOADS_PATH)
+    errors = read_download_errors()
     emit(
         'full_update', {
             'links': [link_to_dict(link) for link in links],
             'files': files,
             'fs': fs,
+            'errors': errors,
         },
     )
 

@@ -129,6 +129,61 @@
       <a href="{{ url_for('help_page') }}" class="btn btn-outline-secondary btn-sm">Nápověda</a>
     </h1>
 
+    <!-- Download Errors Section -->
+    <div id="errors-container">
+      {% if errors and errors|length > 0 %}
+        <div class="alert alert-warning mb-4" role="alert">
+          <h5 class="alert-heading mb-3">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" class="bi bi-exclamation-triangle me-2" viewBox="0 0 16 16">
+              <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
+              <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
+            </svg>
+            Problémy se stahováním
+          </h5>
+          <div class="table-responsive">
+            <table class="table table-sm mb-0">
+              <thead>
+                <tr>
+                  <th>Soubor</th>
+                  <th>Chyba</th>
+                  <th>Akce</th>
+                </tr>
+              </thead>
+              <tbody id="errors-tbody">
+                {% for err in errors %}
+                  <tr data-file-id="{{ err.file_id }}">
+                    <td class="text-break" style="max-width: 300px;">{{ err.file_name }}</td>
+                    <td>
+                      {% if err.error_type == 'Temporary unavailable' %}
+                        Soubor dočasně nedostupný
+                      {% elif err.error_type == 'Fatal error' %}
+                        Kritická chyba: {{ err.error_message or 'Neznámá chyba' }}
+                      {% elif err.error_type == 'Connection failed' %}
+                        Připojení selhalo
+                      {% elif err.error_type == 'Not found' %}
+                        Soubor nenalezen
+                      {% else %}
+                        {{ err.error_type }}
+                      {% endif %}
+                      <small class="text-muted d-block">Automaticky se opakuje...</small>
+                    </td>
+                    <td class="text-nowrap">
+                      <form method="post" action="{{ url_for('dismiss_error') }}" class="d-inline">
+                        <input type="hidden" name="file_id" value="{{ err.file_id }}">
+                        <button type="submit" class="btn btn-sm btn-outline-danger" title="Odstranit z fronty">
+                          Zrušit
+                        </button>
+                      </form>
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      {% endif %}
+    </div>
+
     <form method="post" action="{{ url_for('index') }}" novalidate class="row g-2">
       <div class="col-12 col-md-8">
         <input
@@ -400,6 +455,62 @@
       `;
     }
 
+    function renderErrors(errors) {
+      const container = document.getElementById('errors-container');
+      if (!container) return;
+
+      if (!errors || errors.length === 0) {
+        container.innerHTML = '';
+        return;
+      }
+
+      let rows = '';
+      errors.forEach(err => {
+        let errorText = err.error_type;
+        if (err.error_type === 'Temporary unavailable') {
+          errorText = 'Soubor dočasně nedostupný';
+        } else if (err.error_type === 'Fatal error') {
+          errorText = 'Kritická chyba: ' + (err.error_message || 'Neznámá');
+        } else if (err.error_type === 'Connection failed') {
+          errorText = 'Připojení selhalo';
+        } else if (err.error_type === 'Not found') {
+          errorText = 'Soubor nenalezen';
+        }
+
+        rows += `
+          <tr data-file-id="${err.file_id}">
+            <td class="text-break" style="max-width: 300px;">${err.file_name}</td>
+            <td>${errorText}</td>
+            <td class="text-nowrap">
+              <form method="post" action="/error/dismiss" class="d-inline">
+                <input type="hidden" name="file_id" value="${err.file_id}">
+                <button type="submit" class="btn btn-sm btn-outline-danger">Zrušit</button>
+              </form>
+            </td>
+          </tr>
+        `;
+      });
+
+      container.innerHTML = `
+        <div class="alert alert-warning mb-4" role="alert">
+          <h5 class="alert-heading mb-3">Problémy se stahováním</h5>
+          <p class="mb-3 small">Stahovač automaticky opakuje pokusy. Tlačítkem Zrušit soubor odstraníte z fronty.</p>
+          <div class="table-responsive">
+            <table class="table table-sm mb-0">
+              <thead>
+                <tr>
+                  <th>Soubor</th>
+                  <th>Chyba</th>
+                  <th>Akce</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        </div>
+      `;
+    }
+
     function updateFs(fs) {
       if (!fsProgress || !fsText) return;
       fsProgress.style.setProperty('--bs-progress-bar-color', 'var(--bs-body-color)');
@@ -418,6 +529,7 @@
       if (payload.links !== undefined) renderLinks(payload.links);
       if (payload.files !== undefined) renderFiles(payload.files);
       if (payload.fs) updateFs(payload.fs);
+      if (payload.errors !== undefined) renderErrors(payload.errors);
     });
 
     socket.on('disconnect', () => {
