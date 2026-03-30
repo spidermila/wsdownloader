@@ -15,11 +15,14 @@ PY
 # Workers/threads can be tuned via env vars
 : "${WEB_CONCURRENCY:=1}"
 : "${WEB_THREADS:=2}"
+: "${LOG_LEVEL:=INFO}"
+
 gunicorn "app:app" \
   --bind 0.0.0.0:5000 \
+  --no-control-socket \
   --workers "${WEB_CONCURRENCY}" \
   --threads "${WEB_THREADS}" \
-  --access-logfile '-' \
+  --log-level "${LOG_LEVEL,,}" \
   --error-logfile '-' &
 APP_PID=$!
 
