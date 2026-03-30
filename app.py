@@ -28,13 +28,7 @@ from passlib.hash import md5_crypt
 
 
 def configure_logging() -> logging.Logger:
-    allowed_levels = {
-        'INFO': logging.INFO,
-        'WARNING': logging.WARNING,
-        'ERROR': logging.ERROR,
-    }
-    level_name = os.getenv('LOG_LEVEL', 'INFO').upper()
-    level = allowed_levels.get(level_name, logging.INFO)
+    level = os.getenv('LOG_LEVEL', 'INFO').upper()
 
     formatter = logging.Formatter(
         fmt='[%(asctime)s.%(msecs)03d] %(levelname)s %(name)s: %(message)s',
@@ -103,8 +97,7 @@ class Link:
             _purl = Path(urlparse(url=self.url).path)
             return _purl.name
         except:  # NOQA: E722
-            message = f'unable to extract file name from url {self.url}='
-            logger.error(message)
+            logger.error(f'unable to extract file name from url {self.url}=')
             raise
 
     def get_human_size(self) -> str:
@@ -219,8 +212,7 @@ def save_credentials(user_name: str, password: str) -> bool:
         return False
     salt = get_salt(user_name)
     if salt is None:
-        message = f'Failed to get salt for user {user_name}'
-        logger.error(message)
+        logger.error(f'Failed to get salt for user {user_name}')
         return False
     password_hash = hashlib.sha1(
         md5_crypt.hash(password, salt=salt).encode('utf-8'),
@@ -241,13 +233,13 @@ def api_post(url: str | bytes, data: dict, headers: dict) -> tuple[str, str]:
     try:
         response = requests.post(url, data=data, headers=headers)
     except ConnectionError as e:
-        message = f'Connection failed {e.strerror=}, {e.errno=}, {e.filename=}'
-        logger.error(message)
+        logger.error(
+            f'Connection failed {e.strerror=}, {e.errno=}, {e.filename=}',
+        )
         return ('Connection failed', '<dummy></dummy>')
     rc = response.status_code
     if rc != 200:
-        message = f'Got RC: {rc}, {response.text=}'
-        logger.error(message)
+        logger.error(f'Got RC: {rc}, {response.text=}')
         return ('Connection failed', '<dummy></dummy>')
     return ('OK', response.text)
 
@@ -280,8 +272,7 @@ def login_and_get_token() -> str | None:
     status = root.find('status')
     if isinstance(status, ET.Element):
         if status.text == 'OK':
-            message = 'login OK'
-            logger.info(message)
+            logger.info('login OK')
             token_element = root.find('token')
             if isinstance(token_element, ET.Element):
                 return str(token_element.text)
@@ -295,19 +286,16 @@ def check_token(token: str) -> bool:
         'wst': token,
     }
     if len(token) < 1:
-        message = 'No token is set - user is not logged in.'
-        logger.info(message)
+        logger.info('No token is set - user is not logged in.')
         return False
     _, payload = api_post(url, data=data, headers=headers)
     root = ET.fromstring(payload)
     status = root.find('status')
     if isinstance(status, ET.Element):
         if status.text == 'OK':
-            message = 'check_token() OK'
-            logger.info(message)
+            logger.info('check_token() OK')
             return True
-    message = 'check_token() failed'
-    logger.error(message)
+    logger.error('check_token() failed')
     return False
 
 
@@ -319,8 +307,7 @@ def read_links_from_db() -> list[Link]:
     """).fetchall()
     links: list[Link] = []
     if len(rows) == 0:
-        message = 'read_links_from_db() No links found in database'
-        logger.info(message)
+        logger.info('read_links_from_db() No links found in database')
         return links
     for row in rows:
         _link = Link(url=row['url'])
@@ -361,13 +348,13 @@ def validate_url(url) -> str:
     p = urlparse(url)
     allowed_schemes = {'http', 'https'}
     if allowed_schemes is not None and p.scheme.lower() not in allowed_schemes:
-        message = f"Invalid URL scheme: {p.scheme}, allowed: {allowed_schemes}"
-        logger.error(message)
+        logger.error(
+            f"Invalid URL scheme: {p.scheme}, allowed: {allowed_schemes}",
+        )
         return 'Neplatný link.'
 
     if p.port is not None and not (0 <= p.port <= 65535):
-        message = f"Invalid URL port: {p.port}"
-        logger.error(message)
+        logger.error(f"Invalid URL port: {p.port}")
         return 'Neplatný link.'
 
     host = p.hostname or ''
@@ -377,22 +364,18 @@ def validate_url(url) -> str:
     ):
         parts = [int(x) for x in host.split('.')]
         if any(not (0 <= x <= 255) for x in parts):
-            message = f"Invalid IPv4 address: {host}"
-            logger.error(message)
+            logger.error(f"Invalid IPv4 address: {host}")
             return 'Neplatný link.'
-    message = f"URL validated successfully: {url}"
-    logger.info(message)
+    logger.info(f"URL validated successfully: {url}")
     return 'ok'
 
 
 def test_url(url: str) -> bool:
     response = requests.head(url)
     if response.status_code == 200:
-        message = f"URL test succeeded: {url}"
-        logger.info(message)
+        logger.info(f"URL test succeeded: {url}")
         return True
-    message = f"URL test failed: {url}"
-    logger.info(message)
+    logger.info(f"URL test failed: {url}")
     return False
 
 
@@ -408,18 +391,13 @@ def add_link_if_new(link_raw: str) -> tuple[bool, str]:
         )
         db.commit()
         added = cur.rowcount > 0
-        message = (
-            'add_link_if_new() Link '
-            f"{'added' if added else 'already exists'}: {url}"
-        )
         if added:
-            logger.info(message)
+            logger.info(f'add_link_if_new() Link added: {url}')
         else:
-            logger.warning(message)
+            logger.warning(f'add_link_if_new() Link already exists: {url}')
         return (added, url)
     except sqlite3.Error:
-        message = f"add_link_if_new() Error adding link: {url}"
-        logger.error(message)
+        logger.error(f"add_link_if_new() Error adding link: {url}")
         return (False, url)
 
 
@@ -451,11 +429,9 @@ def get_fs_usage(base_path: Optional[Path] = None) -> dict:
             'mount_display': str(base_path),
         }
     except Exception as e:
-        message = (
-            'get_fs_usage() Error getting fs usage '
-            f"for {base_path}: {e}"
+        logger.error(
+            f'get_fs_usage() Error getting fs usage for {base_path}: {e}',
         )
-        logger.error(message)
         return {
             'total': 0, 'used': 0, 'free': 0,
             'total_h': '0 B', 'used_h': '0 B', 'free_h': '0 B',
@@ -478,11 +454,10 @@ def list_downloaded_files() -> list[dict]:
                     'size': _human_size(stat.st_size),
                 })
     except Exception as e:
-        message = (
-            'list_downloaded_files() Error '
-            f"listing files in {DOWNLOADS_PATH}: {e}"
+        logger.error(
+            f'list_downloaded_files() Error listing files in '
+            f'{DOWNLOADS_PATH}: {e}',
         )
-        logger.error(message)
     return files
 
 
@@ -515,8 +490,9 @@ def get_db_state_hash() -> str:
         state_str = '|'.join(state_parts)
         return hashlib.md5(state_str.encode()).hexdigest()
     except Exception as e:
-        message = f"get_db_state_hash() Error computing state hash: {e}"
-        logger.error(message)
+        logger.error(
+            f"get_db_state_hash() Error computing state hash: {e}",
+        )
         return ''
 
 
@@ -524,8 +500,7 @@ def monitor_database_changes():
     """Background thread that monitors for database/filesystem changes."""
     global _last_db_hash
 
-    message = 'monitor_database_changes() Thread started'
-    logger.info(message)
+    logger.info('monitor_database_changes() Thread started')
 
     _last_db_hash = get_db_state_hash()
 
@@ -564,23 +539,19 @@ def monitor_database_changes():
                         'fs': fs,
                     },
                 )
-                message = (
+                logger.info(
                     'monitor_database_changes() Emitted update: '
-                    f"{len(links)} links, {len(files)} files"
+                    f"{len(links)} links, {len(files)} files",
                 )
-                logger.info(message)
 
         except Exception as e:
-            message = (
-                'monitor_database_changes() Error in monitor thread: '
-                f"{e}"
+            logger.error(
+                f'monitor_database_changes() Error in monitor thread: {e}',
             )
-            logger.error(message)
             import traceback
             traceback.print_exc()
 
-    message = 'monitor_database_changes() Thread stopped'
-    logger.info(message)
+    logger.info('monitor_database_changes() Thread stopped')
 
 
 def start_monitor():
@@ -591,16 +562,14 @@ def start_monitor():
         _monitor_running = True
         _monitor_thread = Thread(target=monitor_database_changes, daemon=True)
         _monitor_thread.start()
-        message = 'start_monitor() Monitor thread started'
-        logger.info(message)
+        logger.info('start_monitor() Monitor thread started')
 
 
 def stop_monitor():
     """Stop the background monitoring thread."""
     global _monitor_running
     _monitor_running = False
-    message = 'stop_monitor() Monitor thread stopping...'
-    logger.info(message)
+    logger.info('stop_monitor() Monitor thread stopping...')
 
 
 @app.before_request
@@ -616,27 +585,24 @@ def before_request():
 def index():
     if request.method == 'POST':
         url_input = request.form.get('link', '')
-        message = validate_url(url_input)
+        val_message = validate_url(url_input)
 
-        if message == 'ok' and not test_url(url_input):
+        if val_message == 'ok' and not test_url(url_input):
             message = 'Link nedostupný'
-            log_message = f"index() {message}, input was: {url_input}"
-            logger.error(log_message)
+            logger.error(f"index() {message}, input was: {url_input}")
             flash(message, 'error')
-        elif message != 'ok':
+        elif val_message != 'ok':
             message = f"index() URL validation failed, input was: {url_input}"
             logger.error(message)
             flash(message, 'error')
         else:
             added, value = add_link_if_new(url_input)
             if added:
-                message = f"index() Link added: {value}"
-                logger.info(message)
+                logger.info(f"index() Link added: {value}")
                 flash(f"Přidáno: {value}", 'success')
                 socketio.emit('link_added', link_to_dict(Link(value)))
             else:
-                message = f"index() Link already exists: {value}"
-                logger.info(message)
+                logger.info(f"index() Link already exists: {value}")
                 flash(f"Již existuje: {value}", 'warning')
         return redirect(url_for('index'))
 
@@ -679,28 +645,25 @@ def save_login():
     user_name = (request.form.get('user_name') or '').strip()
     password = request.form.get('password') or ''
     if not user_name or not password:
-        message = 'save_login() Missing username or password'
-        logger.error(message)
+        logger.error('save_login() Missing username or password')
         flash('Je třeba vyplnit uživatelské jméno i heslo.', 'error')
         return redirect(url_for('index'))
 
     if not save_credentials(user_name, password):
-        message = (
-            'save_login() Failed to save '
-            f'credentials for user {user_name}'
+        logger.error(
+            f'save_login() Failed to save credentials for user {user_name}',
         )
-        logger.error(message)
         flash('Přihlášení selhalo', 'error')
         return redirect(url_for('index'))
     token = login_and_get_token()
     if not token:
-        message = f'save_login() Failed to obtain token for user {user_name}'
-        logger.error(message)
+        logger.error(
+            f'save_login() Failed to obtain token for user {user_name}',
+        )
         flash('Přihlášení selhalo', 'error')
         return redirect(url_for('index'))
     save_token_value(token)
-    message = f'save_login() User {user_name} logged in successfully'
-    logger.info(message)
+    logger.info(f'save_login() User {user_name} logged in successfully')
     flash('Úspěšné přihlášení', 'success')
     return redirect(url_for('index'))
 
@@ -717,8 +680,7 @@ def logout():
     """,
     )
     db.commit()
-    message = 'logout() User logged out successfully'
-    logger.info(message)
+    logger.info('logout() User logged out successfully')
     flash('Odhlášení proběhlo úspěšně', 'success')
     return redirect(url_for('index'))
 
@@ -737,13 +699,11 @@ def delete_link():
     db.commit()
 
     if cur.rowcount > 0:
-        message = f'delete_link() Link deleted: {url_to_delete}'
-        logger.info(message)
+        logger.info(f'delete_link() Link deleted: {url_to_delete}')
         flash(f"Odstraněno: {url_to_delete}", 'success')
         socketio.emit('link_deleted', {'url': url_to_delete})
     else:
-        message = f'delete_link() Link not found: {url_to_delete}'
-        logger.warning(message)
+        logger.warning(f'delete_link() Link not found: {url_to_delete}')
         flash(f"Nenalezeno: {url_to_delete}", 'error')
     return redirect(url_for('index'))
 
@@ -752,8 +712,7 @@ def delete_link():
 def delete_file():
     filename = (request.form.get('filename') or '').strip()
     if not filename:
-        message = 'delete_file() No filename provided'
-        logger.error(message)
+        logger.error('delete_file() No filename provided')
         flash('Zadán název souboru.', 'error')
         return redirect(url_for('index'))
 
@@ -762,27 +721,23 @@ def delete_file():
         candidate = (root / filename).resolve()
 
         if not str(candidate).startswith(str(root) + os.sep):
-            message = (
+            logger.error(
                 'delete_file() Invalid file path: '
-                f"{candidate} is outside of {root}"
+                f'{candidate} is outside of {root}',
             )
-            logger.error(message)
             flash('Neplatná cesta k souboru.', 'error')
             return redirect(url_for('index'))
 
         if candidate.exists() and candidate.is_file():
             candidate.unlink()
-            message = f'delete_file() File deleted: {candidate}'
-            logger.info(message)
+            logger.info(f'delete_file() File deleted: {candidate}')
             flash(f"Odstraněn soubor: {filename}", 'success')
             socketio.emit('file_deleted', {'filename': filename})
         else:
-            message = f'delete_file() File not found: {candidate}'
-            logger.warning(message)
+            logger.warning(f'delete_file() File not found: {candidate}')
             flash(f"Soubor nenalezen: {filename}", 'error')
     except Exception as e:
-        message = f"delete_file() Error deleting file {filename}: {e}"
-        logger.error(message)
+        logger.error(f"delete_file() Error deleting file {filename}: {e}")
         flash(f"Chyba při odstraňování souboru: {filename}", 'error')
 
     return redirect(url_for('index'))
@@ -799,13 +754,14 @@ def update_auto_download():
         (enabled,),
     )
     db.commit()
-    message = (
+    logger.info(
         'update_auto_download() Auto-download '
-        f'{"enabled" if enabled else "disabled"}'
+        f'{"enabled" if enabled else "disabled"}',
     )
-    logger.info(message)
-    msg = f'Automatické stahování {"zapnuto" if enabled else "vypnuto"}.'
-    flash(msg, 'success')
+    flash(
+        f'Automatické stahování {"zapnuto" if enabled else "vypnuto"}.',
+        'success',
+    )
     return redirect(url_for('index'))
 
 
@@ -815,11 +771,10 @@ def update_dark_mode():
     db = get_db()
     db.execute('UPDATE settings SET dark_mode = ? WHERE id = 1', (dark_mode,))
     db.commit()
-    message = (
+    logger.info(
         'update_dark_mode() Dark mode '
-        f'{"enabled" if dark_mode else "disabled"}'
+        f'{"enabled" if dark_mode else "disabled"}',
     )
-    logger.info(message)
     return redirect(url_for('index'))
 
 
@@ -832,8 +787,7 @@ def help_page():
 @socketio.on('connect')
 def handle_connect():
     """Send current state when client connects."""
-    message = 'handle_connect() Client connected via WebSocket'
-    logger.info(message)
+    logger.info('handle_connect() Client connected via WebSocket')
     links = read_links_from_db()
     files = list_downloaded_files()
     fs = get_fs_usage(DOWNLOADS_PATH)
@@ -849,8 +803,7 @@ def handle_connect():
 @socketio.on('disconnect')
 def handle_disconnect():
     """Handle client disconnection."""
-    message = 'handle_disconnect() Client disconnected from WebSocket'
-    logger.info(message)
+    logger.info('handle_disconnect() Client disconnected from WebSocket')
 
 
 @socketio.on('request_update')

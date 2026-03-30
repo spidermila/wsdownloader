@@ -16,13 +16,7 @@ from requests import RequestException
 
 
 def configure_logging() -> logging.Logger:
-    allowed_levels = {
-        'INFO': logging.INFO,
-        'WARNING': logging.WARNING,
-        'ERROR': logging.ERROR,
-    }
-    level_name = os.getenv('LOG_LEVEL', 'INFO').upper()
-    level = allowed_levels.get(level_name, logging.INFO)
+    level = os.getenv('LOG_LEVEL', 'INFO').upper()
 
     logging.basicConfig(
         level=level,
@@ -71,8 +65,9 @@ def get_db() -> sqlite3.Connection:
     try:
         conn.execute('PRAGMA journal_mode=WAL;')
     except sqlite3.DatabaseError:
-        message = f'Failed to set journal_mode to WAL for {DB_PATH}'
-        logger.error(message)
+        logger.error(
+            f'Failed to set journal_mode to WAL for {DB_PATH}',
+        )
     return conn
 
 
@@ -90,14 +85,12 @@ def delete_by_id(row_id: int) -> int:
         cur = db.execute('DELETE FROM links WHERE id = ?', (row_id,))
         db.commit()
         db.close()
-        message = (
+        logger.info(
             'delete_by_id() Deleted row with id '
-            f'{row_id}: {"Success" if cur.rowcount > 0 else "Row not found"}'
+            f'{row_id}: {"Success" if cur.rowcount > 0 else "Row not found"}',
         )
-        logger.info(message)
     except sqlite3.Error as e:
-        message = f'delete_by_id() Database error: {e}'
-        logger.error(message)
+        logger.error(f'delete_by_id() Database error: {e}')
         return 0
     return cur.rowcount
 
@@ -114,8 +107,7 @@ def set_pct_downloaded_by_id(row_id: int, new_pct: int) -> bool:
         db.close()
         return updated
     except sqlite3.Error as e:
-        message = f'set_pct_downloaded_by_id() Database error: {e}'
-        logger.error(message)
+        logger.error(f'set_pct_downloaded_by_id() Database error: {e}')
         return False
 
 
@@ -129,16 +121,14 @@ def set_file_size_by_id(row_id: int, size_bytes: int) -> bool:
         db.commit()
         updated = cur.rowcount > 0
         db.close()
-        message = (
+        logger.info(
             'set_file_size_by_id() Updated row '
             f'{row_id} with size_bytes={size_bytes}: '
-            f'{"Success" if updated else "Row not found"}'
+            f'{"Success" if updated else "Row not found"}',
         )
-        logger.info(message)
         return updated
     except sqlite3.Error as e:
-        message = f'set_file_size_by_id() Database error: {e}'
-        logger.error(message)
+        logger.error(f'set_file_size_by_id() Database error: {e}')
         return False
 
 
@@ -152,16 +142,14 @@ def set_status_downloaded_by_id(row_id: int, new_status: str) -> bool:
         db.commit()
         updated = cur.rowcount > 0
         db.close()
-        message = (
+        logger.info(
             'set_status_downloaded_by_id() Updated row '
             f"{row_id} with status='{new_status}': "
-            f'{"Success" if updated else "Row not found"}'
+            f'{"Success" if updated else "Row not found"}',
         )
-        logger.info(message)
         return updated
     except sqlite3.Error as e:
-        message = f'set_status_downloaded_by_id() Database error: {e}'
-        logger.error(message)
+        logger.error(f'set_status_downloaded_by_id() Database error: {e}')
         return False
 
 
@@ -196,11 +184,10 @@ def get_fs_usage(base_path: Optional[Path] = None) -> dict:
             'percent_free': round(percent_free, 1),
         }
     except Exception as e:
-        message = (
+        logger.error(
             'get_fs_usage() Error getting filesystem usage '
-            f'for {base_path}: {e}'
+            f'for {base_path}: {e}',
         )
-        logger.error(message)
         return {
             'total': 0,
             'used': 0,
@@ -214,21 +201,20 @@ def api_post(url: str | bytes, data: dict, headers: dict) -> tuple[str, str]:
     try:
         response = requests.post(url, data=data, headers=headers)
     except RequestException as e:
-        message = f'api_post() Connection failed: {e}'
-        logger.error(message)
+        logger.error(f'api_post() Connection failed: {e}')
         return ('Connection failed', '<dummy></dummy>')
 
     rc = response.status_code
     if rc != 200:
-        message = f'api_post() Got RC: {rc}, response.text={response.text!r}'
-        logger.error(message)
+        logger.error(
+            f'api_post() Got RC: {rc}, response.text={response.text!r}',
+        )
         return ('Connection failed', '<dummy></dummy>')
 
     if isinstance(url, bytes):
         url = url.decode('utf-8', errors='replace')
 
-    message = f'api_post() Successful POST to {url}, RC: {rc}'
-    logger.info(message)
+    logger.info(f'api_post() Successful POST to {url}, RC: {rc}')
     return ('OK', response.text)
 
 
@@ -279,12 +265,11 @@ def download_file(url: str, row_id: int) -> None:
         if last_modified:
             headers['If-Range'] = last_modified
 
-    message = (
+    logger.info(
         'download_file() Starting download of '
         f'{url} to {temp_filepath} '
-        f'(resume from {existing_bytes} bytes)'
+        f'(resume from {existing_bytes} bytes)',
     )
-    logger.info(message)
     set_status_downloaded_by_id(row_id=row_id, new_status='downloading')
 
     bytes_downloaded = existing_bytes
@@ -402,24 +387,20 @@ def check_token(token: str) -> bool:
         'wst': token,
     }
     if len(token) < 1:
-        message = 'No token is set - user is not logged in.'
-        logger.info(message)
+        logger.info('No token is set - user is not logged in.')
         return False
     result, payload = api_post(url, data=data, headers=headers)
     if result == 'Connection failed':
-        message = 'check_token() Connection failed'
-        logger.error(message)
+        logger.error('check_token() Connection failed')
         return False
 
     root = ET.fromstring(payload)
     status = root.find('status')
     if isinstance(status, ET.Element) and status.text == 'OK':
-        message = f'check_token() Token is valid: {token}'
-        logger.info(message)
+        logger.info(f'check_token() Token is valid: {token}')
         return True
 
-    message = f'check_token() Token is invalid: {token}'
-    logger.warning(message)
+    logger.warning(f'check_token() Token is invalid: {token}')
     return False
 
 
@@ -431,8 +412,7 @@ def get_queue(token: str) -> tuple[str, list[dict] | None]:
     }
     result, payload = api_post(url, data=data, headers=headers)
     if result == 'Connection failed':
-        message = 'get_queue() Connection failed'
-        logger.error(message)
+        logger.error('get_queue() Connection failed')
         return ('Connection failed', None)
 
     root = ET.fromstring(payload)
@@ -456,15 +436,13 @@ def get_queue(token: str) -> tuple[str, list[dict] | None]:
             }
             response_dict['files'].append(file_info)
 
-        message = (
+        logger.info(
             'get_queue() Retrieved queue with '
-            f"{len(response_dict['files'])} files"
+            f"{len(response_dict['files'])} files",
         )
-        logger.info(message)
         return ('OK', response_dict['files'])
 
-    message = 'get_queue() Failed to retrieve queue'
-    logger.warning(message)
+    logger.warning('get_queue() Failed to retrieve queue')
     return ('Not found', None)
 
 
@@ -498,23 +476,22 @@ def get_download_link(token: str, file_id: str) -> tuple[str, str | None]:
                 return ('OK', link.text)
 
         if status.text == 'FATAL':
-            message = f'get_download_link() Fatal error for file_id={file_id}'
-            logger.error(message)
+            logger.error(
+                f'get_download_link() Fatal error for file_id={file_id}',
+            )
             message_elem = root.find('message')
             if isinstance(message_elem, ET.Element) and message_elem.text:
                 if message_elem.text == 'File temporarily unavailable.':
-                    message = (
-                        'get_download_link() File temporarily unavailable for '
-                        f'file_id={file_id}, raw payload: {payload}'
+                    logger.info(
+                        f'get_download_link() File temporarily unavailable '
+                        f'for file_id={file_id}, raw payload: {payload}',
                     )
-                    logger.info(message)
                     return ('Temporary unavailable', None)
 
-    message = (
+    logger.warning(
         'get_download_link() Failed to retrieve download link for '
-        f'file_id={file_id}'
+        f'file_id={file_id}',
     )
-    logger.warning(message)
     return ('Not found', None)
 
 
@@ -527,15 +504,15 @@ def dequeue_file(token: str, file_id) -> str | None:
     }
     result, payload = api_post(url, data=data, headers=headers)
     if result == 'Connection failed':
-        message = f'dequeue_file() Connection failed for file_id={file_id}'
-        logger.error(message)
+        logger.error(
+            f'dequeue_file() Connection failed for file_id={file_id}',
+        )
         return None
 
     root = ET.fromstring(payload)
     status = root.find('status')
     if isinstance(status, ET.Element) and status.text == 'OK':
-        message = f'dequeue_file() Successfully dequeued file_id={file_id}'
-        logger.info(message)
+        logger.info(f'dequeue_file() Successfully dequeued file_id={file_id}')
         return status.text
 
     return None
@@ -544,8 +521,7 @@ def dequeue_file(token: str, file_id) -> str | None:
 def add_link_if_new(link_raw: str) -> tuple[bool, str]:
     url = (link_raw or '').strip()
     if not url:
-        message = f'add_link_if_new() Invalid URL: {link_raw}'
-        logger.warning(message)
+        logger.warning(f'add_link_if_new() Invalid URL: {link_raw}')
         return (False, '')
 
     db = get_db()
@@ -557,21 +533,17 @@ def add_link_if_new(link_raw: str) -> tuple[bool, str]:
         db.commit()
         added = cur.rowcount > 0
         if added:
-            message = f'add_link_if_new() Added new link to DB: {url}'
-            logger.info(message)
+            logger.info(f'add_link_if_new() Added new link to DB: {url}')
         else:
-            message = (
-                'add_link_if_new() Link already exists in DB, '
-                f'not added: {url}'
+            logger.info(
+                'add_link_if_new() Link already exists '
+                f'in DB, not added: {url}',
             )
-            logger.info(message)
         return (added, url)
     except sqlite3.Error:
-        message = (
-            'add_link_if_new() Database error while adding '
-            f'link: {url}'
+        logger.error(
+            f'add_link_if_new() Database error while adding link: {url}',
         )
-        logger.error(message)
         return (False, url)
 
 
@@ -587,29 +559,25 @@ def main_loop() -> None:
                     file_name = file['name']
                     _, link = get_download_link(token, file_id)
                     if link:
-                        message = (
+                        logger.warning(
                             'main_loop() Retrieved download link for '
                             f'file_id={file_id}, file_name={file_name} '
-                            'and adding it to the local queue'
+                            'and adding it to the local queue',
                         )
-                        logger.warning(message)
                         add_status, _ = add_link_if_new(link)
                         if add_status:
                             dequeue_file(token, file_id)
                     else:
-                        message = (
+                        logger.warning(
                             'main_loop() Failed to retrieve download link for '
-                            f'file_id={file_id}, file_name={file_name}'
+                            f'file_id={file_id}, file_name={file_name}',
                         )
-                        logger.warning(message)
             else:
-                message = 'main_loop() No files in WS queue'
-                logger.info(message)
+                logger.info('main_loop() No files in WS queue')
 
     row = fetch_oldest()
     if not row:
-        message = 'main_loop() No links to process. DB is empty.'
-        logger.info(message)
+        logger.info('main_loop() No links to process. DB is empty.')
         sleep(10)
         return
 
@@ -618,20 +586,17 @@ def main_loop() -> None:
 
     response = requests.head(url)
     if response.status_code == 200:
-        message = (
-            'main_loop() Valid link '
-            f'found for row_id={row_id}, url={url}'
+        logger.info(
+            f'main_loop() Valid link found for row_id={row_id}, url={url}',
         )
-        logger.info(message)
         file_size = int(response.headers['Content-Length'])
         set_file_size_by_id(row_id, file_size)
         download_file(url, row_id)
     else:
-        message = (
+        logger.warning(
             'main_loop() Invalid link or connection not working for '
-            f'row_id={row_id}, url={url}'
+            f'row_id={row_id}, url={url}',
         )
-        logger.warning(message)
         sleep(10)
 
 
