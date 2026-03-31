@@ -17,7 +17,7 @@ Aplikace, která:
 - je primárně určena ke stahování souborů z Webshare.cz (WS), ale můžete manuálně přidat i odkazy odjinud,
 - běží v Docker kontejneru,
 - obsahuje seznam souborů ke stažení a tyto soubory postupně stahuje,
-- spravuje lokální úložiště - zobrazuje místo na disku a umožňuje mazat stažené soubory,
+- spravuje lokální úložiště - zobrazuje místo na disku a umožňuje přejmenovat, či mazat stažené soubory,
 - skládá se ze dvou součástí:
   - app.py - poskytuje webové uživatelské rozhraní
   - downloader.py - služba v pozadí, která sleduje seznam přání na WS a stahuje tyto soubory, nebo stahuje soubory manuálně přidané do seznamu souborů ke stažení
@@ -81,7 +81,7 @@ Features:
 - Primarily for downloading files from Webshare.cz (WS) but you can also queue files from elsewhere too.
 - Made to run in a container (tested with Docker).
 - Add files to a download queue and the app downloads them one by one.
-- Manage the local repository - see the remaining disk space, delete individual files.
+- Manage the local repository - see the remaining disk space, rename or delete individual files.
 - The app consists of two components:
   - app.py - web UI (overview of local queue and downloaded files)
   - downloader.py - background worker (downloading files, reading the WS queue, removing files from WS queue)
