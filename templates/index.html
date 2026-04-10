@@ -317,6 +317,14 @@
                   </td>
                   <td class="d-none d-sm-table-cell">{{ f.size }}</td>
                   <td class="actions-cell">
+                    {% set ext = f.name.rsplit('.', 1)[-1].lower() if '.' in f.name else '' %}
+                    {% if ext in ['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'wmv', 'm4v', 'ts', 'mpeg', 'mpg'] %}
+                    <a href="{{ url_for('player', filename=f.name) }}"
+                       class="btn btn-sm btn-outline-success me-1"
+                       aria-label="Přehrát {{ f.name }}">
+                      ▶ Přehrát
+                    </a>
+                    {% endif %}
                     <button type="button" class="btn btn-sm btn-outline-secondary me-1" onclick="startRename(this)" aria-label="Přejmenovat {{ f.name }}">
                       Přejmenovat
                     </button>
@@ -427,18 +435,30 @@
       files.forEach(f => {
         const tr = document.createElement('tr');
         tr.dataset.filename = f.name;
+        const playBtn = isVideoFile(f.name)
+          ? `<a href="/player/${encodeURIComponent(f.name)}"
+               class="btn btn-sm btn-outline-success me-1"
+               aria-label="Přehrát ${f.name}">
+              ▶ Přehrát
+             </a>`
+          : '';
         tr.innerHTML = `
           <td class="fw-semibold text-break col-filename">
             <span class="filename-display">${f.name}</span>
           </td>
           <td class="d-none d-sm-table-cell">${f.size}</td>
           <td class="actions-cell">
+            ${playBtn}
             <button type="button" class="btn btn-sm btn-outline-secondary me-1" onclick="startRename(this)" aria-label="Přejmenovat ${f.name}">
               Přejmenovat
             </button>
-            <form method="post" action="{{ url_for('delete_file') }}" class="d-inline">
+            <form method="post"
+              action="{{ url_for('delete_file') }}"
+              class="d-inline">
               <input type="hidden" name="filename" value="${f.name}">
-              <button type="submit" class="btn btn-sm btn-danger" aria-label="Odstranit ${f.name}">
+              <button type="submit"
+                  class="btn btn-sm btn-danger"
+                  aria-label="Odstranit ${f.name}">
                 Smazat
               </button>
             </form>
@@ -702,6 +722,11 @@
         `<span class="filename-display">${escapedName}</span>`;
 
       actionsCell.innerHTML = `
+        <a href="/player/${encodeURIComponent(filename)}"
+           class="btn btn-sm btn-outline-success me-1"
+           aria-label="Přehrát ${escapedName}">
+          ▶ Přehrát
+        </a>
         <button type="button"
                 class="btn btn-sm btn-outline-secondary me-1"
                 onclick="startRename(this)"
@@ -724,6 +749,16 @@
     function updateRenamingState() {
       const editingRows = document.querySelectorAll('tr[data-editing="true"]');
       isRenaming = editingRows.length > 0;
+    }
+
+    const VIDEO_EXTENSIONS = new Set([
+      'mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'wmv', 'm4v', 'ts', 'mpeg', 'mpg'
+    ]);
+
+    function isVideoFile(filename) {
+      const dot = filename.lastIndexOf('.');
+      if (dot < 0) return false;
+      return VIDEO_EXTENSIONS.has(filename.slice(dot + 1).toLowerCase());
     }
   </script>
 </body>

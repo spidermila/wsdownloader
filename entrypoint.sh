@@ -11,18 +11,19 @@ init_db()
 print("DB initialized")
 PY
 
-# Start web (Gunicorn, production-ready)
-# Workers/threads can be tuned via env vars
+# Start web (Gunicorn + gevent for proper async concurrency with Flask-SocketIO)
+# WEB_CONCURRENCY controls the number of gevent workers (each handles thousands of
+# concurrent greenlets, so 1-2 workers is typically enough).
 : "${WEB_CONCURRENCY:=1}"
-: "${WEB_THREADS:=2}"
 : "${LOG_LEVEL:=INFO}"
 
 gunicorn "app:app" \
   --bind 0.0.0.0:5000 \
   --no-control-socket \
+  --worker-class geventwebsocket.gunicorn.workers.GeventWebSocketWorker \
   --workers "${WEB_CONCURRENCY}" \
-  --threads "${WEB_THREADS}" \
   --log-level "${LOG_LEVEL,,}" \
+  --access-logfile '-' \
   --error-logfile '-' &
 APP_PID=$!
 

@@ -1,10 +1,14 @@
+import fcntl
 import hashlib
+import json
 import logging
+import mimetypes
 import os
 import re
 import secrets
 import shutil
 import sqlite3
+import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -13,6 +17,7 @@ from time import sleep
 from typing import Optional
 from urllib.parse import urlparse
 
+import gevent.socket
 import requests
 from flask import flash
 from flask import Flask
@@ -77,7 +82,7 @@ BASE_URL = 'https://webshare.cz/api/'
 
 _appHasRunBefore = False
 
-socketio = SocketIO(app, cors_allowed_origins='*')
+socketio = SocketIO(app, cors_allowed_origins='*', async_mode='gevent')
 
 # Background monitoring state
 _last_db_hash = None
@@ -997,6 +1002,93 @@ def dismiss_error():
     return redirect(url_for('index'))
 
 
+@app.route('/stream/<path:filename>')
+def stream_file(filename):
+    """Serve a file from the downloads directory with range request support."""
+    root = DOWNLOADS_PATH.resolve()
+    candidate = (root / filename).resolve()
+
+    if not str(candidate).startswith(str(root) + os.sep):
+        logger.error('stream_file() Path traversal attempt: %s', filename)
+        return 'Forbidden', 403
+
+    if not candidate.exists() or not candidate.is_file():
+        logger.warning('stream_file() File not found: %s', filename)
+        return 'Not Found', 404
+
+    file_size = candidate.stat().st_size
+    mime_type, _ = mimetypes.guess_type(str(candidate))
+    if not mime_type:
+        mime_type = 'application/octet-stream'
+
+    range_header = request.headers.get('Range')
+
+    if range_header:
+        try:
+            byte_range = range_header.replace('bytes=', '')
+            parts = byte_range.split('-')
+            start = int(parts[0]) if parts[0] else 0
+            end = int(parts[1]) if parts[1] else file_size - 1
+        except (ValueError, IndexError):
+            return 'Bad Request', 400
+
+        end = min(end, file_size - 1)
+        length = end - start + 1
+
+        def generate():
+            with open(candidate, 'rb') as f:
+                f.seek(start)
+                remaining = length
+                chunk_size = 65536
+                while remaining > 0:
+                    chunk = f.read(min(chunk_size, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    yield chunk
+
+        headers = {
+            'Content-Range': f'bytes {start}-{end}/{file_size}',
+            'Accept-Ranges': 'bytes',
+            'Content-Length': str(length),
+            'Content-Type': mime_type,
+        }
+        return app.response_class(generate(), status=206, headers=headers)
+
+    def generate_full():
+        with open(candidate, 'rb') as f:
+            while True:
+                chunk = f.read(65536)
+                if not chunk:
+                    break
+                yield chunk
+
+    headers = {
+        'Accept-Ranges': 'bytes',
+        'Content-Length': str(file_size),
+        'Content-Type': mime_type,
+    }
+    return app.response_class(generate_full(), status=200, headers=headers)
+
+
+@app.route('/player/<path:filename>')
+def player(filename):
+    """Render the video player page for a file."""
+    root = DOWNLOADS_PATH.resolve()
+    candidate = (root / filename).resolve()
+
+    if not str(candidate).startswith(str(root) + os.sep):
+        logger.error('player() Path traversal attempt: %s', filename)
+        return 'Forbidden', 403
+
+    if not candidate.exists() or not candidate.is_file():
+        logger.warning('player() File not found: %s', filename)
+        return 'Not Found', 404
+
+    settings = get_settings()
+    return render_template('player.html', filename=filename, settings=settings)
+
+
 @socketio.on('connect')
 def handle_connect():
     """Send current state when client connects."""
@@ -1050,12 +1142,298 @@ def link_to_dict(link: Link) -> dict:
 
 @app.after_request
 def add_no_cache(response):
+    if request.endpoint in (
+        'stream_file', 'player', 'stream_track', 'subtitle_track',
+    ):
+        return response
     response.headers['Cache-Control'] = (
         'no-store, no-cache, must-revalidate, max-age=0'
     )
     response.headers['Pragma'] = 'no-cache'
     response.headers['Expires'] = '0'
     return response
+
+
+_LANG_NAMES = {
+    'ces': 'Čeština', 'cze': 'Čeština', 'cs': 'Čeština',
+    'eng': 'Angličtina', 'en': 'Angličtina',
+    'deu': 'Němčina', 'ger': 'Němčina', 'de': 'Němčina',
+    'fra': 'Francouzština', 'fre': 'Francouzština', 'fr': 'Francouzština',
+    'spa': 'Španělština', 'es': 'Španělština',
+    'ita': 'Italština', 'it': 'Italština',
+    'pol': 'Polština', 'pl': 'Polština',
+    'slk': 'Slovenština', 'slo': 'Slovenština', 'sk': 'Slovenština',
+    'hun': 'Maďarština', 'hu': 'Maďarština',
+    'rus': 'Ruština', 'ru': 'Ruština',
+    'jpn': 'Japonština', 'ja': 'Japonština',
+    'zho': 'Čínština', 'chi': 'Čínština', 'zh': 'Čínština',
+    'kor': 'Korejština', 'ko': 'Korejština',
+    'por': 'Portugalština', 'pt': 'Portugalština',
+    'nld': 'Nizozemština', 'dut': 'Nizozemština', 'nl': 'Nizozemština',
+    'swe': 'Švédština', 'sv': 'Švédština',
+    'nor': 'Norština', 'nb': 'Norština', 'nn': 'Norština',
+    'dan': 'Dánština', 'da': 'Dánština',
+    'fin': 'Finština', 'fi': 'Finština',
+    'ukr': 'Ukrajinština', 'uk': 'Ukrajinština',
+    'tur': 'Turečtina', 'tr': 'Turečtina',
+    'ara': 'Arabština', 'ar': 'Arabština',
+    'heb': 'Hebrejština', 'he': 'Hebrejština',
+    'hin': 'Hindština', 'hi': 'Hindština',
+    'und': '',
+}
+
+_CHANNEL_LABELS = {1: 'Mono', 2: 'Stereo', 6: '5.1', 8: '7.1'}
+
+_CODEC_DISPLAY = {
+    'aac': 'AAC', 'ac3': 'AC3', 'eac3': 'EAC3', 'dts': 'DTS',
+    'mp3': 'MP3', 'flac': 'FLAC', 'vorbis': 'Vorbis', 'opus': 'Opus',
+    'truehd': 'TrueHD', 'mlp': 'MLP',
+    'pcm_s16le': 'PCM', 'pcm_s24le': 'PCM', 'pcm_s32le': 'PCM',
+}
+
+
+def _track_label(
+    n, language, title, codec, channels=None,
+    fallback_prefix='Stopa',
+):
+    lang_name = _LANG_NAMES.get(language.lower(), language) if language else ''
+    codec_str = _CODEC_DISPLAY.get(codec, codec.upper() if codec else '')
+    ch_str = (
+        _CHANNEL_LABELS.get(channels, f'{channels}ch')
+        if channels else ''
+    )
+    details_parts = [p for p in [codec_str, ch_str] if p]
+    details = f' ({", ".join(details_parts)})' if details_parts else ''
+
+    if title and lang_name:
+        return f'{title} — {lang_name}{details}'
+    if title:
+        return f'{title}{details}'
+    if lang_name:
+        return f'{lang_name}{details}'
+    return f'{fallback_prefix} {n}{details}'
+
+
+@app.route('/file-info/<path:filename>')
+def file_info(filename):
+    """Return audio and subtitle track info for a file using ffprobe."""
+    root = DOWNLOADS_PATH.resolve()
+    candidate = (root / filename).resolve()
+
+    if not str(candidate).startswith(str(root) + os.sep):
+        return jsonify({'error': 'Forbidden'}), 403
+    if not candidate.exists() or not candidate.is_file():
+        return jsonify({'error': 'Not found'}), 404
+
+    try:
+        result = subprocess.run(
+            [
+                'ffprobe', '-v', 'quiet',
+                '-print_format', 'json',
+                '-show_streams',
+                str(candidate),
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        data = json.loads(result.stdout)
+    except FileNotFoundError:
+        logger.error('file_info() ffprobe not found')
+        return jsonify({'error': 'ffprobe not available'}), 500
+    except Exception as e:
+        logger.error('file_info() Error running ffprobe: %s', e)
+        return jsonify({'error': str(e)}), 500
+
+    audio_tracks = []
+    subtitle_tracks = []
+
+    for stream in data.get('streams', []):
+        codec_type = stream.get('codec_type', '')
+        tags = stream.get('tags', {})
+        index = stream.get('index', 0)
+        language = tags.get('language') or tags.get('LANGUAGE') or ''
+        title = tags.get('title') or tags.get('TITLE') or ''
+        codec = stream.get('codec_name', '')
+
+        if codec_type == 'audio':
+            channels = stream.get('channels', 0)
+            audio_tracks.append({
+                'index': index,
+                'label': _track_label(
+                    len(audio_tracks) + 1, language, title, codec,
+                    channels, fallback_prefix='Stopa',
+                ),
+            })
+        elif codec_type == 'subtitle':
+            # Skip image-based codecs — cannot convert to WebVTT
+            if codec in ('hdmv_pgs_subtitle', 'dvd_subtitle', 'dvdsub'):
+                continue
+            subtitle_tracks.append({
+                'index': index,
+                'label': _track_label(
+                    len(subtitle_tracks) + 1, language, title, codec,
+                    fallback_prefix='Titulky',
+                ),
+            })
+
+    return jsonify({
+        'audio_tracks': audio_tracks,
+        'subtitle_tracks': subtitle_tracks,
+    })
+
+
+@app.route('/stream-track/<path:filename>')
+def stream_track(filename):
+    """
+    Stream a file via FFmpeg with a selected audio track.
+    Query params:
+      audio=<stream_index>  — ffmpeg stream index of the audio track
+      t=<seconds>           — start time offset for seeking (default: 0)
+    """
+    root = DOWNLOADS_PATH.resolve()
+    candidate = (root / filename).resolve()
+
+    if not str(candidate).startswith(str(root) + os.sep):
+        return 'Forbidden', 403
+    if not candidate.exists() or not candidate.is_file():
+        return 'Not Found', 404
+
+    try:
+        audio_index = int(request.args.get('audio', 0))
+        start_time = float(request.args.get('t', 0))
+    except ValueError:
+        return 'Bad Request', 400
+
+    # When seeking to a non-zero offset, mixing -c:v copy with -c:a aac causes
+    # A/V timestamp desync: video preserves original PTS (~T) while the AAC
+    # encoder resets its clock to 0. Re-encoding video fixes the alignment.
+    if start_time > 0:
+        video_codec = ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23']
+    else:
+        video_codec = ['-c:v', 'copy']
+
+    cmd = [
+        'ffmpeg',
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-ss', str(start_time),
+        '-i', str(candidate),
+        '-map', '0:v:0',
+        '-map', f'0:{audio_index}',
+        *video_codec,
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-f', 'mp4',
+        '-movflags', 'frag_keyframe+empty_moov',
+        'pipe:1',
+    ]
+
+    logger.info('stream_track() Running: %s', ' '.join(cmd))
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        logger.error('stream_track() ffmpeg not found')
+        return 'ffmpeg not available', 500
+
+    def generate():
+        try:
+            while True:
+                chunk = proc.stdout.read(65536)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            proc.stdout.close()
+            proc.wait()
+
+    return app.response_class(
+        generate(),
+        status=200,
+        headers={
+            'Content-Type': 'video/mp4',
+            'X-Accel-Buffering': 'no',
+        },
+    )
+
+
+@app.route('/subtitle-track/<path:filename>')
+def subtitle_track(filename):
+    """Extract a subtitle stream as WebVTT for client-side rendering."""
+    root = DOWNLOADS_PATH.resolve()
+    candidate = (root / filename).resolve()
+
+    if not str(candidate).startswith(str(root) + os.sep):
+        return 'Forbidden', 403
+    if not candidate.exists() or not candidate.is_file():
+        return 'Not Found', 404
+
+    try:
+        stream_index = int(request.args.get('index', 0))
+    except ValueError:
+        return 'Bad Request', 400
+
+    logger.info(
+        'subtitle_track() Extracting index %d from %s', stream_index, filename,
+    )
+
+    cmd = [
+        'ffmpeg',
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-i', str(candidate),
+        '-map', f'0:{stream_index}',
+        '-f', 'webvtt',
+        'pipe:1',
+    ]
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=0,
+        )
+    except FileNotFoundError:
+        logger.error('subtitle_track() ffmpeg not found')
+        return 'ffmpeg not available', 500
+
+    fd = proc.stdout.fileno()
+    # Set FD non-blocking so os.read() returns EAGAIN instead of blocking.
+    # Then use gevent.socket.wait_read() to yield to the hub until data
+    # arrives — the proper gevent-native way to read from a pipe.
+    old_flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, old_flags | os.O_NONBLOCK)
+
+    chunks = []
+    try:
+        while True:
+            gevent.socket.wait_read(fd, timeout=30)
+            try:
+                chunk = os.read(fd, 4096)
+            except BlockingIOError:
+                continue
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except Exception as exc:
+        proc.kill()
+        logger.error('subtitle_track() read error: %s', exc)
+        return 'Subtitle extraction failed', 500
+    finally:
+        proc.stdout.close()
+
+    vtt_bytes = b''.join(chunks)
+    logger.info(
+        'subtitle_track() done, %d bytes', len(vtt_bytes),
+    )
+    return app.response_class(
+        vtt_bytes,
+        status=200,
+        headers={'Content-Type': 'text/vtt; charset=utf-8'},
+    )
 
 
 if __name__ == '__main__':
