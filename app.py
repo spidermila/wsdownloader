@@ -1,4 +1,3 @@
-import fcntl
 import hashlib
 import json
 import logging
@@ -17,7 +16,7 @@ from time import sleep
 from typing import Optional
 from urllib.parse import urlparse
 
-import gevent.socket
+import gevent.subprocess
 import requests
 from flask import flash
 from flask import Flask
@@ -1360,9 +1359,17 @@ def stream_track(filename):
     )
 
 
+SUBTITLE_CACHE_DIR = DATA_DIR / 'subtitle_cache'
+SUBTITLE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+
 @app.route('/subtitle-track/<path:filename>')
 def subtitle_track(filename):
-    """Extract a subtitle stream as WebVTT for client-side rendering."""
+    """Extract a subtitle stream as WebVTT for client-side rendering.
+
+    Extracted VTT files are cached under DATA_DIR/subtitle_cache so that
+    only the first request for a given file+track is slow.
+    """
     root = DOWNLOADS_PATH.resolve()
     candidate = (root / filename).resolve()
 
@@ -1375,6 +1382,20 @@ def subtitle_track(filename):
         stream_index = int(request.args.get('index', 0))
     except ValueError:
         return 'Bad Request', 400
+
+    safe_name = filename.replace(os.sep, '_')
+    cache_file = SUBTITLE_CACHE_DIR / f'{safe_name}.{stream_index}.vtt'
+
+    if cache_file.exists():
+        logger.info(
+            'subtitle_track() Cache hit for index %d from %s',
+            stream_index, filename,
+        )
+        return app.response_class(
+            cache_file.read_bytes(),
+            status=200,
+            headers={'Content-Type': 'text/vtt; charset=utf-8'},
+        )
 
     logger.info(
         'subtitle_track() Extracting index %d from %s', stream_index, filename,
@@ -1390,44 +1411,38 @@ def subtitle_track(filename):
         'pipe:1',
     ]
     try:
-        proc = subprocess.Popen(
+        proc = gevent.subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            bufsize=0,
+            stdout=gevent.subprocess.PIPE,
+            stderr=gevent.subprocess.DEVNULL,
         )
     except FileNotFoundError:
         logger.error('subtitle_track() ffmpeg not found')
         return 'ffmpeg not available', 500
 
-    fd = proc.stdout.fileno()
-    # Set FD non-blocking so os.read() returns EAGAIN instead of blocking.
-    # Then use gevent.socket.wait_read() to yield to the hub until data
-    # arrives — the proper gevent-native way to read from a pipe.
-    old_flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-    fcntl.fcntl(fd, fcntl.F_SETFL, old_flags | os.O_NONBLOCK)
-
-    chunks = []
     try:
-        while True:
-            gevent.socket.wait_read(fd, timeout=30)
-            try:
-                chunk = os.read(fd, 4096)
-            except BlockingIOError:
-                continue
-            if not chunk:
-                break
-            chunks.append(chunk)
+        vtt_bytes, _ = proc.communicate(timeout=300)
+    except gevent.subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        logger.error('subtitle_track() ffmpeg timed out')
+        return 'Subtitle extraction timed out', 500
     except Exception as exc:
         proc.kill()
         logger.error('subtitle_track() read error: %s', exc)
         return 'Subtitle extraction failed', 500
-    finally:
-        proc.stdout.close()
 
-    vtt_bytes = b''.join(chunks)
+    if proc.returncode != 0 or not vtt_bytes:
+        logger.error(
+            'subtitle_track() ffmpeg failed, rc=%d bytes=%d',
+            proc.returncode, len(vtt_bytes),
+        )
+        return 'Subtitle extraction failed', 500
+
+    cache_file.write_bytes(vtt_bytes)
     logger.info(
-        'subtitle_track() done, %d bytes', len(vtt_bytes),
+        'subtitle_track() done, %d bytes, cached to %s',
+        len(vtt_bytes), cache_file.name,
     )
     return app.response_class(
         vtt_bytes,

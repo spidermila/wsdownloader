@@ -122,6 +122,7 @@
     let subtitleTracks = [];
     let streamLoading = false;
     let subtitleCues = []; // [{start, end, text}]
+    let subtitleOffset = 0; // seconds added to video.currentTime for subtitle lookup
 
     const subtitleDebug = document.getElementById('subtitle-debug');
 
@@ -168,7 +169,7 @@
     }
 
     function updateSubtitleOverlay() {
-      const t = video.currentTime;
+      const t = video.currentTime + subtitleOffset;
       const active = subtitleCues.find(c => t >= c.start && t < c.end);
       if (active) {
         subtitleText.textContent = active.text;
@@ -228,6 +229,7 @@
       if (streamLoading) return;
       streamLoading = true;
       const savedSubtitleIndex = selectedSubtitleIndex;
+      subtitleOffset = startTime;
 
       setTranscodeStatus(true);
       videoSource.src = `${streamTrackBaseUrl}`
@@ -243,7 +245,7 @@
     }
 
     function reloadWithTracks() {
-      const savedTime = video.currentTime;
+      const savedTime = video.currentTime + subtitleOffset;
       const wasPlaying = !video.paused;
       const savedSubtitleIndex = selectedSubtitleIndex;
 
@@ -251,6 +253,7 @@
         loadTranscoded(savedTime, wasPlaying);
       } else {
         setTranscodeStatus(false);
+        subtitleOffset = 0;
         videoSource.src = directUrl;
         video.load();
         video.addEventListener('loadedmetadata', function onLoaded() {
@@ -266,9 +269,9 @@
     video.addEventListener('seeking', () => {
       if (!needsTranscode() || streamLoading) return;
 
-      const targetTime = video.currentTime;
+      const targetTime = video.currentTime + subtitleOffset;
       for (let i = 0; i < video.buffered.length; i++) {
-        if (video.buffered.start(i) <= targetTime && targetTime <= video.buffered.end(i)) {
+        if (video.buffered.start(i) <= targetTime - subtitleOffset && targetTime - subtitleOffset <= video.buffered.end(i)) {
           return;
         }
       }

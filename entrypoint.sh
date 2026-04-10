@@ -22,6 +22,7 @@ gunicorn "app:app" \
   --no-control-socket \
   --worker-class geventwebsocket.gunicorn.workers.GeventWebSocketWorker \
   --workers "${WEB_CONCURRENCY}" \
+  --timeout 120 \
   --log-level "${LOG_LEVEL,,}" \
   --access-logfile '-' \
   --error-logfile '-' &
