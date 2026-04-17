@@ -2,6 +2,11 @@
 
 Docker image changelog:
 
+## 0.4.0
+(released 18-Apr-2026)
+- Added a player to the web app. Now you can play the video files in your browser.
+- Some minor optimizations
+
 ## 0.3.0
 (released 30-Mar-2026)
 - Changed to native Python logging
