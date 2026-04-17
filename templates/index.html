@@ -610,7 +610,6 @@
     });
 
     socket.on('full_update', (payload) => {
-      console.log('Received update:', payload);
       if (payload.links !== undefined) renderLinks(payload.links);
       if (payload.files !== undefined) renderFiles(payload.files);
       if (payload.fs) updateFs(payload.fs);
@@ -621,8 +620,17 @@
       console.log('Disconnected from server');
     });
 
-    // Keep the periodic update as fallback
-    setInterval(() => socket.emit('request_update'), 2000);
+    // Request a fresh update when the user returns to this tab,
+    // but only if they were away for at least 5 seconds.
+    let hiddenAt = null;
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        hiddenAt = Date.now();
+      } else if (hiddenAt !== null && Date.now() - hiddenAt >= 5000) {
+        socket.emit('request_update');
+        hiddenAt = null;
+      }
+    });
 
     document.querySelectorAll('.alert').forEach((el) => {
       const timeout = Number(el.dataset.timeout || 15000);

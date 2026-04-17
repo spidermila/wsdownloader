@@ -1571,6 +1571,7 @@ def stream_track(filename):
             and range_end is not None and range_end < 16
         )
         if is_probe:
+            assert isinstance(range_end, int)
             null_bytes = bytes(range_end + 1)
             resp = make_response(null_bytes, 206)
             resp.headers['Content-Type'] = 'video/mp4'
@@ -1673,12 +1674,14 @@ def stream_track(filename):
                     yield chunk
             else:
                 while True:
+                    assert isinstance(proc.stdout, int)
                     chunk = proc.stdout.read(65536)
                     if not chunk:
                         break
                     total_bytes += len(chunk)
                     yield chunk
         finally:
+            assert isinstance(proc.stdout, int)
             proc.stdout.close()
             rc = proc.wait()
             logger.info(
