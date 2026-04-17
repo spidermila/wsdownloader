@@ -4,361 +4,264 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{{ filename }} — Přehrávač</title>
+  <link href="https://vjs.zencdn.net/8.21.1/video-js.css" rel="stylesheet" />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" />
   <style>
-    body {
-      background: #000;
-      color: #fff;
-      min-height: 100vh;
+    body { background: #000; color: #fff; min-height: 100vh; }
+    .player-wrapper { max-width: 1280px; margin: 0 auto; }
+    #player-container { width: 100%; background: #000; }
+    /* fluid mode uses padding-top trick — cap it so very wide screens don't get huge height */
+    .video-js.vjs-fluid { max-height: 75vh; }
+    /* Subtitle text is rendered by Video.js in .vjs-text-track-display, which is
+       inside the player container and stays visible even when controls auto-hide. */
+    .video-js .vjs-text-track-display { z-index: 1; }
+    /* Make subtitle text legible */
+    .video-js .vjs-text-track-cue { font-size: 3em !important; }
+    #hls-spinner {
+      display: flex; align-items: center; justify-content: center;
+      height: 200px; background: #111;
     }
-    .player-wrapper {
-      max-width: 1280px;
-      margin: 0 auto;
-    }
-    #video-container {
-      position: relative;
-      line-height: 0; /* remove gap below video */
-    }
-    video {
-      width: 100%;
-      max-height: 72vh;
-      background: #000;
-      display: block;
-    }
-    #subtitle-display {
-      position: absolute;
-      bottom: 3.2rem; /* above native controls */
-      left: 0;
-      right: 0;
-      text-align: center;
-      pointer-events: none;
-      padding: 0 1.5rem;
-      line-height: normal;
-      z-index: 10;
-    }
-    #subtitle-display span {
-      display: inline-block;
-      background: rgba(0, 0, 0, 0.72);
-      color: #fff;
-      font-size: 1.1rem;
-      padding: 0.15rem 0.55rem;
-      border-radius: 3px;
-      white-space: pre-wrap;
-    }
-    /* Fullscreen: keep overlay inside the container */
-    #video-container:fullscreen video { max-height: 100vh; }
-    #video-container:-webkit-full-screen video { max-height: 100vh; }
-    .track-section label {
-      font-size: 0.875rem;
-    }
-    .back-link {
-      font-size: 0.9rem;
-    }
+    .track-section label { font-size: 0.875rem; }
   </style>
 </head>
 <body>
   <div class="player-wrapper px-2 px-md-4 py-3">
 
     <div class="d-flex align-items-center gap-3 mb-3">
-      <a href="/" class="btn btn-sm btn-outline-secondary back-link">&larr; Zpět</a>
+      <a href="/" class="btn btn-sm btn-outline-secondary">&larr; Zpět</a>
       <h1 class="h5 mb-0 text-truncate" title="{{ filename }}">{{ filename }}</h1>
     </div>
 
-    <div id="video-container">
-      <video id="player" controls preload="metadata">
-        <source id="video-source" src="{{ url_for('stream_file', filename=filename) }}" />
-        Váš prohlížeč nepodporuje přehrávání videa.
-      </video>
-      <div id="subtitle-display"><span id="subtitle-text" style="display:none;"></span></div>
-    </div>
-
-    <div class="mt-3 track-section" id="track-controls" style="display:none !important;">
-      <div class="row g-3">
-        <div class="col-12 col-sm-auto" id="audio-track-wrapper" style="display:none;">
-          <label for="audio-track-select" class="form-label mb-1">Zvuková stopa</label>
-          <select id="audio-track-select" class="form-select form-select-sm" style="min-width:180px;"></select>
-        </div>
-        <div class="col-12 col-sm-auto" id="subtitle-track-wrapper" style="display:none;">
-          <label for="subtitle-track-select" class="form-label mb-1">Titulky</label>
-          <select id="subtitle-track-select" class="form-select form-select-sm" style="min-width:180px;"></select>
-          <div id="subtitle-debug" class="text-muted small mt-1" style="display:none;"></div>
-        </div>
-        <div class="col-12 col-sm-auto d-flex align-items-end" id="transcode-notice" style="display:none !important;">
-          <span class="text-warning small">
-            <span class="spinner-border spinner-border-sm me-1" role="status" id="transcode-spinner" style="display:none;"></span>
-            <span id="transcode-msg"></span>
-          </span>
-        </div>
+    <div id="hls-spinner">
+      <div class="text-center">
+        <div class="spinner-border text-light mb-2" role="status"></div>
+        <div class="text-muted small" id="hls-status-msg">Připravuji stream…</div>
       </div>
     </div>
 
-    <p class="text-muted small mt-3 mb-0">
-      Tip: Klávesu <kbd>F</kbd> pro fullscreen, <kbd>Mezerník</kbd> pro pauzu, šipky <kbd>←</kbd>/<kbd>→</kbd> pro skok o 5 s.
-    </p>
+    <div id="player-container">
+      <video id="my-player"
+             class="video-js vjs-default-skin vjs-big-play-centered"
+             controls
+             preload="none"
+             style="display:none;">
+      </video>
+    </div>
+
+    <div class="mt-3" id="audio-track-wrapper" style="display:none;">
+      <label for="audio-track-select" class="form-label mb-1">Zvuková stopa</label>
+      <select id="audio-track-select" class="form-select form-select-sm" style="min-width:180px;"></select>
+      <div id="audio-status" class="text-warning small mt-1" style="display:none;">
+        <span class="spinner-border spinner-border-sm me-1" role="status"></span>
+        <span id="audio-status-msg"></span>
+      </div>
+    </div>
+
   </div>
 
+  <script src="https://vjs.zencdn.net/8.21.1/video.js"></script>
   <script>
-    const video = document.getElementById('player');
-    const videoSource = document.getElementById('video-source');
-    const videoContainer = document.getElementById('video-container');
-    const subtitleText = document.getElementById('subtitle-text');
-    const trackControls = document.getElementById('track-controls');
-    const audioWrapper = document.getElementById('audio-track-wrapper');
-    const audioSelect = document.getElementById('audio-track-select');
-    const subtitleWrapper = document.getElementById('subtitle-track-wrapper');
-    const subtitleSelect = document.getElementById('subtitle-track-select');
-    const transcodeNotice = document.getElementById('transcode-notice');
-    const transcodeSpinner = document.getElementById('transcode-spinner');
-    const transcodeMsg = document.getElementById('transcode-msg');
+    const FILENAME      = {{ filename | tojson }};
+    const SUBTITLE_BASE = {{ url_for('subtitle_track', filename=filename) | tojson }};
+    const FILENAME_PATH = FILENAME.split('/').map(encodeURIComponent).join('/');
 
-    const filename = {{ filename | tojson }};
-    const directUrl = {{ url_for('stream_file', filename=filename) | tojson }};
-    const subtitleBaseUrl = {{ url_for('subtitle_track', filename=filename) | tojson }};
-    const streamTrackBaseUrl = {{ url_for('stream_track', filename=filename) | tojson }};
+    var hlsSpinner     = document.getElementById('hls-spinner');
+    var hlsStatusMsg   = document.getElementById('hls-status-msg');
+    var audioWrapper   = document.getElementById('audio-track-wrapper');
+    var audioSelect    = document.getElementById('audio-track-select');
+    var audioStatus    = document.getElementById('audio-status');
+    var audioStatusMsg = document.getElementById('audio-status-msg');
 
-    let selectedAudioIndex = null;
-    let selectedSubtitleIndex = -1;
-    let audioTracks = [];
-    let subtitleTracks = [];
-    let streamLoading = false;
-    let subtitleCues = []; // [{start, end, text}]
-    let subtitleOffset = 0; // seconds added to video.currentTime for subtitle lookup
+    var player         = null;
+    var audioTracks    = [];
+    var subtitleTracks = [];
+    var selectedAudioIdx = 0;
+    var selectedSubIdx   = -1;   // subtitle stream index currently showing, -1 = none
+    var switchingAudio   = false;
 
-    const subtitleDebug = document.getElementById('subtitle-debug');
-
-    function setSubtitleDebug(msg) {
-      subtitleDebug.textContent = msg;
-      subtitleDebug.style.display = msg ? '' : 'none';
+    function hlsStatusUrl(audioIdx) {
+      return '/hls-status/' + FILENAME_PATH + '?audio=' + audioIdx;
     }
-    // Custom <div> overlay driven by timeupdate — avoids all browser <track> quirks.
-
-    function vttTimeToSeconds(s) {
-      const m = s.match(/^(?:(\d+):)?(\d{2}):(\d{2}[.,]\d+)$/);
-      if (!m) return NaN;
-      return (parseInt(m[1] || 0, 10) * 3600)
-        + (parseInt(m[2], 10) * 60)
-        + parseFloat(m[3].replace(',', '.'));
+    function hlsPlaylistUrl(audioIdx) {
+      return '/hls/' + FILENAME_PATH + '/' + audioIdx + '/playlist.m3u8';
     }
 
-    function parseVTT(text) {
-      const cues = [];
-      const blocks = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split(/\n\n+/);
-      for (const block of blocks) {
-        const lines = block.trim().split('\n');
-        if (!lines.length) continue;
-        const first = lines[0];
-        if (first.startsWith('WEBVTT') || first.startsWith('NOTE')
-            || first.startsWith('STYLE') || first.startsWith('REGION')) continue;
+    // ── Video.js player ────────────────────────────────────────────────────────
+    function initPlayer(audioIdx, seekTo) {
+      var videoEl = document.getElementById('my-player');
+      videoEl.style.display = '';
 
-        let i = 0;
-        if (!lines[i].includes('-->')) i++; // skip optional cue id
-        if (i >= lines.length || !lines[i].includes('-->')) continue;
+      if (!player) {
+        player = videojs('my-player', {
+          fluid: true,
+          html5: {
+            vhs: {
+              // On iOS use native HLS; everywhere else use VHS (MSE)
+              overrideNative: !videojs.browser.IS_IOS,
+              enableLowInitialPlaylist: true,
+            },
+          },
+          playbackRates: [0.5, 1, 1.25, 1.5, 2],
+          userActions: { hotkeys: true },
+        });
 
-        const m = lines[i].match(/^(\S+)\s+-->\s+(\S+)/);
-        if (!m) continue;
-        const start = vttTimeToSeconds(m[1]);
-        const end = vttTimeToSeconds(m[2]);
-        if (isNaN(start) || isNaN(end)) continue;
-
-        // Strip WebVTT/HTML tags for plain-text display
-        const cueText = lines.slice(i + 1).join('\n').trim()
-          .replace(/<[^>]+>/g, '');
-        if (cueText) cues.push({ start, end, text: cueText });
+        // Track the currently-selected subtitle so we can restore it after
+        // an audio-track switch re-adds all the remote text tracks.
+        player.textTracks().addEventListener('change', function() {
+          var tracks = player.textTracks();
+          selectedSubIdx = -1;
+          for (var i = 0; i < tracks.length; i++) {
+            if (tracks[i].mode === 'showing' && tracks[i].kind === 'subtitles') {
+              var m = tracks[i].src && tracks[i].src.match(/[?&]index=(\d+)/);
+              if (m) selectedSubIdx = parseInt(m[1], 10);
+              break;
+            }
+          }
+        });
       }
-      return cues;
-    }
 
-    function updateSubtitleOverlay() {
-      const t = video.currentTime + subtitleOffset;
-      const active = subtitleCues.find(c => t >= c.start && t < c.end);
-      if (active) {
-        subtitleText.textContent = active.text;
-        subtitleText.style.display = '';
-      } else {
-        subtitleText.style.display = 'none';
-      }
-    }
+      player.src({ src: hlsPlaylistUrl(audioIdx), type: 'application/x-mpegURL' });
 
-    video.addEventListener('timeupdate', updateSubtitleOverlay);
+      // ready() fires immediately if already ready, otherwise queues callback
+      player.ready(function() {
+        applySubtitles();
+      });
 
-    async function applySubtitle(index) {
-      subtitleCues = [];
-      subtitleText.style.display = 'none';
-      setSubtitleDebug('');
-      if (index < 0) return;
-
-      const url = `${subtitleBaseUrl}?index=${index}`;
-      console.log('[subtitles] Fetching:', url);
-      try {
-        const res = await fetch(url);
-        console.log('[subtitles] Response status:', res.status, res.statusText);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const text = await res.text();
-        console.log('[subtitles] VTT text length:', text.length);
-        console.log('[subtitles] VTT preview:', text.slice(0, 200));
-        subtitleCues = parseVTT(text);
-        console.log('[subtitles] Parsed cues:', subtitleCues.length, subtitleCues.slice(0, 3));
-        setSubtitleDebug(`${subtitleCues.length} titulků načteno`);
-        updateSubtitleOverlay();
-      } catch (err) {
-        console.error('[subtitles] Failed to load subtitle:', err);
-        setSubtitleDebug(`Chyba: ${err.message}`);
-      }
-    }
-
-    // ── Transcoded stream (non-default audio) ───────────────────────────────────
-
-    function setTranscodeStatus(active) {
-      if (active) {
-        transcodeNotice.style.removeProperty('display');
-        transcodeSpinner.style.display = '';
-        transcodeMsg.textContent = 'Překódovávám audio stopy…';
-      } else {
-        transcodeNotice.style.setProperty('display', 'none', 'important');
-        transcodeSpinner.style.display = 'none';
-        transcodeMsg.textContent = '';
-      }
-    }
-
-    function needsTranscode() {
-      const defaultAudio = audioTracks.length > 0 ? audioTracks[0].index : null;
-      return selectedAudioIndex !== null && selectedAudioIndex !== defaultAudio;
-    }
-
-    function loadTranscoded(startTime, resumePlay) {
-      if (streamLoading) return;
-      streamLoading = true;
-      const savedSubtitleIndex = selectedSubtitleIndex;
-      subtitleOffset = startTime;
-
-      setTranscodeStatus(true);
-      videoSource.src = `${streamTrackBaseUrl}`
-        + `?audio=${selectedAudioIndex ?? audioTracks[0].index}&t=${startTime}`;
-      video.load();
-
-      video.addEventListener('loadedmetadata', function onLoaded() {
-        video.removeEventListener('loadedmetadata', onLoaded);
-        streamLoading = false;
-        if (resumePlay) video.play().catch(() => {});
-        applySubtitle(savedSubtitleIndex);
+      // Seek to saved position and start playback once the source is loadable.
+      player.one('canplay', function() {
+        if (seekTo != null && seekTo > 0) player.currentTime(seekTo);
+        player.play().catch(function() {});
       });
     }
 
-    function reloadWithTracks() {
-      const savedTime = video.currentTime + subtitleOffset;
-      const wasPlaying = !video.paused;
-      const savedSubtitleIndex = selectedSubtitleIndex;
-
-      if (needsTranscode()) {
-        loadTranscoded(savedTime, wasPlaying);
-      } else {
-        setTranscodeStatus(false);
-        subtitleOffset = 0;
-        videoSource.src = directUrl;
-        video.load();
-        video.addEventListener('loadedmetadata', function onLoaded() {
-          video.removeEventListener('loadedmetadata', onLoaded);
-          video.currentTime = savedTime;
-          if (wasPlaying) video.play().catch(() => {});
-          applySubtitle(savedSubtitleIndex);
-        });
+    // ── Subtitle management ─────────────────────────────────────────────────────
+    // Video.js renders subtitles inside .vjs-text-track-display, which is a div
+    // inside the player container.  This div is NOT part of the controls overlay,
+    // so subtitles stay visible even when the control bar auto-hides.
+    // The built-in CC button in the control bar lets the user pick a track.
+    function applySubtitles() {
+      if (!player) return;
+      // Remove previously added remote tracks
+      var existing = player.remoteTextTracks();
+      for (var i = existing.length - 1; i >= 0; i--) {
+        player.removeRemoteTextTrack(existing[i]);
       }
+      // Re-add subtitle tracks from file metadata
+      subtitleTracks.forEach(function(t) {
+        var trackObj = player.addRemoteTextTrack({
+          kind: 'subtitles',
+          label: t.label,
+          src: SUBTITLE_BASE + '?index=' + t.index,
+          srclang: t.lang || 'und',
+          default: false,
+        }, false);
+        // Restore previously selected subtitle after an audio-track switch
+        if (t.index === selectedSubIdx && trackObj && trackObj.track) {
+          trackObj.track.mode = 'showing';
+        }
+      });
     }
 
-    // Intercept out-of-buffer seeks on transcoded streams (no range support on pipe).
-    video.addEventListener('seeking', () => {
-      if (!needsTranscode() || streamLoading) return;
+    // ── HLS status polling ──────────────────────────────────────────────────────
+    function startHls(audioIdx) {
+      fetch(hlsStatusUrl(audioIdx))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.status === 'ready') {
+            hlsSpinner.style.display = 'none';
+            initPlayer(audioIdx, null);
+          } else {
+            hlsStatusMsg.textContent = 'Nahrávám video…';
+            setTimeout(function() { startHls(audioIdx); }, 1000);
+          }
+        })
+        .catch(function() { setTimeout(function() { startHls(audioIdx); }, 3000); });
+    }
 
-      const targetTime = video.currentTime + subtitleOffset;
-      for (let i = 0; i < video.buffered.length; i++) {
-        if (video.buffered.start(i) <= targetTime - subtitleOffset && targetTime - subtitleOffset <= video.buffered.end(i)) {
-          return;
-        }
+    // ── Audio track switching ───────────────────────────────────────────────────
+    function switchAudio(newAudioIdx) {
+      if (switchingAudio) return;
+      switchingAudio = true;
+      selectedAudioIdx = newAudioIdx;
+      var savedTime = player ? player.currentTime() : 0;
+      audioStatus.style.display = '';
+      audioStatusMsg.textContent = 'Přepínám stopu…';
+      audioSelect.disabled = true;
+
+      function poll() {
+        fetch(hlsStatusUrl(newAudioIdx))
+          .then(function(r) { return r.json(); })
+          .then(function(data) {
+            if (data.status === 'ready') {
+              initPlayer(newAudioIdx, savedTime);
+              audioStatus.style.display = 'none';
+              audioSelect.disabled = false;
+              switchingAudio = false;
+            } else {
+              audioStatusMsg.textContent = 'Nahrávám video…';
+              setTimeout(poll, 1000);
+            }
+          })
+          .catch(function() { setTimeout(poll, 3000); });
       }
-      loadTranscoded(targetTime, !video.paused);
-    });
+      poll();
+    }
 
-    // ── Track info ──────────────────────────────────────────────────────────────
+    // ── Cancel HLS on navigate away ────────────────────────────────────────────
+    // Terminates any active ffmpeg process so the server isn't left encoding
+    // video nobody is watching.  Uses keepalive:true so the request survives
+    // the page unload; pagehide covers iOS Safari + browser-back navigation.
+    var hlsCancelUrl = '/hls-cancel/' + FILENAME_PATH;
+    var cancelSent = false;
 
-    fetch(`/file-info/${encodeURIComponent(filename)}`)
-      .then(r => r.json())
-      .then(info => {
-        audioTracks = info.audio_tracks || [];
+    function cancelHls() {
+      if (cancelSent) return;
+      cancelSent = true;
+      try {
+        fetch(hlsCancelUrl, { method: 'POST', keepalive: true });
+      } catch (e) { /* ignore */ }
+    }
+
+    // Intercept the back button so the cancel fires before navigation.
+    var backBtn = document.querySelector('a[href="/"]');
+    if (backBtn) {
+      backBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        cancelHls();
+        window.location.href = '/';
+      });
+    }
+
+    // pagehide fires on tab close, browser-back, and iOS Safari page transitions.
+    window.addEventListener('pagehide', cancelHls);
+
+    // ── Boot ───────────────────────────────────────────────────────────────────
+    fetch('/file-info/' + FILENAME_PATH)
+      .then(function(r) { return r.json(); })
+      .then(function(info) {
+        audioTracks    = info.audio_tracks || [];
         subtitleTracks = info.subtitle_tracks || [];
 
-        let hasControls = false;
-
         if (audioTracks.length > 1) {
-          hasControls = true;
           audioWrapper.style.display = '';
-          selectedAudioIndex = audioTracks[0].index;
-
-          audioTracks.forEach((t, i) => {
-            const opt = document.createElement('option');
+          selectedAudioIdx = audioTracks[0].index;
+          audioTracks.forEach(function(t, i) {
+            var opt = document.createElement('option');
             opt.value = t.index;
             opt.textContent = t.label;
             if (i === 0) opt.selected = true;
             audioSelect.appendChild(opt);
           });
-
-          audioSelect.addEventListener('change', () => {
-            selectedAudioIndex = parseInt(audioSelect.value);
-            reloadWithTracks();
+          audioSelect.addEventListener('change', function() {
+            var newIdx = parseInt(audioSelect.value, 10);
+            if (newIdx !== selectedAudioIdx) switchAudio(newIdx);
           });
         }
 
-        if (subtitleTracks.length > 0) {
-          hasControls = true;
-          subtitleWrapper.style.display = '';
-
-          const offOpt = document.createElement('option');
-          offOpt.value = -1;
-          offOpt.textContent = 'Vypnout';
-          offOpt.selected = true;
-          subtitleSelect.appendChild(offOpt);
-
-          subtitleTracks.forEach(t => {
-            const opt = document.createElement('option');
-            opt.value = t.index;
-            opt.textContent = t.label;
-            subtitleSelect.appendChild(opt);
-          });
-
-          subtitleSelect.addEventListener('change', () => {
-            selectedSubtitleIndex = parseInt(subtitleSelect.value);
-            applySubtitle(selectedSubtitleIndex);
-          });
-        }
-
-        if (hasControls) trackControls.style.removeProperty('display');
+        selectedAudioIdx = audioTracks.length > 0 ? audioTracks[0].index : 0;
+        startHls(selectedAudioIdx);
       })
-      .catch(err => console.warn('Could not load track info:', err));
-
-    // ── Keyboard shortcuts ──────────────────────────────────────────────────────
-
-    document.addEventListener('keydown', (e) => {
-      if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
-      if (e.key === 'f' || e.key === 'F') {
-        // Fullscreen the container so the subtitle overlay stays visible
-        if (!document.fullscreenElement) {
-          videoContainer.requestFullscreen().catch(() => {});
-        } else {
-          document.exitFullscreen().catch(() => {});
-        }
-      }
-      if (e.key === ' ') {
-        e.preventDefault();
-        video.paused ? video.play() : video.pause();
-      }
-      if (e.key === 'ArrowRight') {
-        e.preventDefault();
-        video.currentTime = Math.min(video.currentTime + 5, video.duration);
-      }
-      if (e.key === 'ArrowLeft') {
-        e.preventDefault();
-        video.currentTime = Math.max(video.currentTime - 5, 0);
-      }
-    });
+      .catch(function() { startHls(0); });
   </script>
 </body>
 </html>

@@ -7,24 +7,28 @@ import re
 import secrets
 import shutil
 import sqlite3
+import struct
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from threading import Lock
 from threading import Thread
 from time import sleep
 from typing import Optional
 from urllib.parse import urlparse
 
-import gevent.subprocess
 import requests
 from flask import flash
 from flask import Flask
 from flask import g
 from flask import jsonify
+from flask import make_response
 from flask import redirect
 from flask import render_template
 from flask import request
+from flask import send_file
 from flask import url_for
 from flask_socketio import emit
 from flask_socketio import SocketIO
@@ -821,6 +825,7 @@ def delete_file():
 
         if candidate.exists() and candidate.is_file():
             candidate.unlink()
+            _clear_file_caches(candidate)
             logger.info('delete_file() File deleted: %s', candidate)
             flash(f"Odstraněn soubor: {filename}", 'success')
             socketio.emit('file_deleted', {'filename': filename})
@@ -1084,8 +1089,19 @@ def player(filename):
         logger.warning('player() File not found: %s', filename)
         return 'Not Found', 404
 
-    settings = get_settings()
-    return render_template('player.html', filename=filename, settings=settings)
+    ua = request.user_agent.string
+    is_ios = any(x in ua for x in ('iPhone', 'iPad', 'iPod'))
+    native_ok = False if is_ios else _is_native_playback_ok(candidate)
+    response = make_response(
+        render_template(
+            'player.html',
+            filename=filename,
+            is_ios=is_ios,
+            native_ok=native_ok,
+        ),
+    )
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 @socketio.on('connect')
@@ -1143,6 +1159,7 @@ def link_to_dict(link: Link) -> dict:
 def add_no_cache(response):
     if request.endpoint in (
         'stream_file', 'player', 'stream_track', 'subtitle_track',
+        'hls_playlist', 'hls_segment', 'hls_cancel',
     ):
         return response
     response.headers['Cache-Control'] = (
@@ -1264,10 +1281,11 @@ def file_info(filename):
             })
         elif codec_type == 'subtitle':
             # Skip image-based codecs — cannot convert to WebVTT
-            if codec in ('hdmv_pgs_subtitle', 'dvd_subtitle', 'dvdsub'):
+            if codec in _IMAGE_SUBTITLE_CODECS:
                 continue
             subtitle_tracks.append({
                 'index': index,
+                'lang': language or 'und',
                 'label': _track_label(
                     len(subtitle_tracks) + 1, language, title, codec,
                     fallback_prefix='Titulky',
@@ -1280,6 +1298,225 @@ def file_info(filename):
     })
 
 
+_stream_bitrate_cache: dict = {}
+_video_codec_cache: dict = {}
+_video_pix_fmt_cache: dict = {}
+
+# Fixed output bitrate used for iOS transcoding.
+# Video 1500 kbps + audio 128 kbps ≈ 203 KB/s.
+# The same constant is used for byte-offset → seek-time conversion, so the
+# estimate stays accurate regardless of the source file's own bitrate.
+_IOS_STREAM_BITRATE_BPS: int = (1500 + 128) * 1000 // 8
+
+
+def _get_video_codec(candidate) -> str:
+    """Return the source video codec name for stream 0 (e.g. 'h264')."""
+    key = str(candidate)
+    if key in _video_codec_cache:
+        return _video_codec_cache[key]
+    try:
+        result = subprocess.run(
+            [
+                'ffprobe', '-v', 'error',
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream=codec_name',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                str(candidate),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        codec = result.stdout.strip().lower()
+    except Exception:
+        codec = 'unknown'
+    _video_codec_cache[key] = codec
+    return codec
+
+
+def _get_video_pix_fmt(candidate) -> str:
+    """Return the pixel format of the first video stream (e.g. 'yuv420p')."""
+    key = str(candidate)
+    if key in _video_pix_fmt_cache:
+        return _video_pix_fmt_cache[key]
+    try:
+        result = subprocess.run(
+            [
+                'ffprobe', '-v', 'error',
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream=pix_fmt',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                str(candidate),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        pix_fmt = result.stdout.strip().lower()
+    except Exception:
+        pix_fmt = 'unknown'
+    _video_pix_fmt_cache[key] = pix_fmt
+    return pix_fmt
+
+
+_HLS_SEGMENT_TIME = 4  # seconds per HLS segment
+
+
+def _get_video_duration(candidate: Path) -> Optional[float]:
+    """Return video duration in seconds via ffprobe, or None on error."""
+    try:
+        result = subprocess.run(
+            [
+                'ffprobe', '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                str(candidate),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return float(result.stdout.strip())
+    except Exception:
+        return None
+
+
+def _build_vod_playlist(duration: float) -> str:
+    """Return a complete HLS VOD playlist string for the given total duration.
+
+    Segment entries use the nominal _HLS_SEGMENT_TIME duration.  The real .ts
+    files may differ slightly at keyframe boundaries, but hls.js/Video.js use
+    the timestamps inside each segment so the EXTINF values are just hints.
+    Including #EXT-X-ENDLIST from the start makes the player show the full
+    seekbar and treat this as VOD rather than a live stream.
+    """
+    seg_time = _HLS_SEGMENT_TIME
+    n_full = int(duration / seg_time)
+    remainder = duration - n_full * seg_time
+
+    lines = [
+        '#EXTM3U',
+        '#EXT-X-VERSION:3',
+        f'#EXT-X-TARGETDURATION:{seg_time}',
+        '#EXT-X-MEDIA-SEQUENCE:0',
+        '#EXT-X-PLAYLIST-TYPE:VOD',
+    ]
+    for i in range(n_full):
+        lines.append(f'#EXTINF:{seg_time:.6f},')
+        lines.append(f'seg{i:05d}.ts')
+    if remainder > 0.1:
+        lines.append(f'#EXTINF:{remainder:.6f},')
+        lines.append(f'seg{n_full:05d}.ts')
+    lines.append('#EXT-X-ENDLIST')
+    return '\n'.join(lines) + '\n'
+
+
+def _is_native_playback_ok(candidate) -> bool:
+    """
+    Return True if the file can be played natively in desktop browsers without
+    transcoding: H.264 video + AAC audio (common in MKV/MP4 files).
+
+    When True the player uses stream_file (raw bytes, range requests, full
+    seekbar). When False it falls back to stream_track (ffmpeg transcode).
+    """
+    try:
+        result = subprocess.run(
+            [
+                'ffprobe', '-v', 'error',
+                '-show_entries', 'stream=codec_name,codec_type',
+                '-of', 'json',
+                str(candidate),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        streams = json.loads(result.stdout).get('streams', [])
+        video_ok = any(
+            s.get('codec_type') == 'video' and s.get('codec_name') == 'h264'
+            for s in streams
+        )
+        audio_ok = any(
+            s.get('codec_type') == 'audio' and s.get('codec_name') == 'aac'
+            for s in streams
+        )
+        return video_ok and audio_ok
+    except Exception:
+        return False
+
+
+def _get_file_bitrate(candidate, file_size: int) -> int:
+    """Return estimated output bytes/sec based on file size and duration."""
+    key = str(candidate)
+    if key in _stream_bitrate_cache:
+        return _stream_bitrate_cache[key]
+    try:
+        result = subprocess.run(
+            [
+                'ffprobe', '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                str(candidate),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        duration_sec = float(result.stdout.strip())
+        bitrate_Bps = int(
+            file_size / duration_sec,
+        ) if duration_sec > 0 else 625_000
+    except Exception:
+        bitrate_Bps = 625_000  # fallback: 5 Mbps
+    _stream_bitrate_cache[key] = bitrate_Bps
+    return bitrate_Bps
+
+
+def _skip_mp4_init_boxes(proc):
+    """
+    Yield chunks from proc.stdout, skipping initial MP4 initialization boxes
+    (ftyp, moov, free, wide) so that continuation segments start with a moof.
+    iOS already has the init segment from the first response; re-sending it at
+    a non-zero byte offset would confuse its MP4 parser.
+    """
+    SKIP_TYPES = {b'ftyp', b'moov', b'free', b'wide', b'skip'}
+    buf = b''
+    header_skipped = False
+    while True:
+        if not header_skipped:
+            chunk = proc.stdout.read(65536)
+            if not chunk:
+                return
+            buf += chunk
+            while len(buf) >= 8:
+                box_size = struct.unpack('>I', buf[:4])[0]
+                box_type = buf[4:8]
+                if box_size == 1:
+                    if len(buf) < 16:
+                        break
+                    box_size = struct.unpack('>Q', buf[8:16])[0]
+                if box_size < 8:
+                    header_skipped = True
+                    yield buf
+                    buf = b''
+                    break
+                if box_type in SKIP_TYPES:
+                    if len(buf) >= box_size:
+                        buf = buf[box_size:]
+                    else:
+                        break
+                else:
+                    header_skipped = True
+                    yield buf
+                    buf = b''
+                    break
+        else:
+            chunk = proc.stdout.read(65536)
+            if not chunk:
+                return
+            yield chunk
+
+
 @app.route('/stream-track/<path:filename>')
 def stream_track(filename):
     """
@@ -1287,6 +1524,11 @@ def stream_track(filename):
     Query params:
       audio=<stream_index>  — ffmpeg stream index of the audio track
       t=<seconds>           — start time offset for seeking (default: 0)
+
+    iOS Safari requires 206 Partial Content and byte-range support to play
+    video at all.  Desktop browsers (Chrome, Firefox) work fine with a plain
+    200 streaming response.  The two paths are kept separate to avoid Chrome's
+    byte-range continuation requests interfering with the URL t= seek logic.
     """
     root = DOWNLOADS_PATH.resolve()
     candidate = (root / filename).resolve()
@@ -1297,18 +1539,99 @@ def stream_track(filename):
         return 'Not Found', 404
 
     try:
-        audio_index = int(request.args.get('audio', 0))
-        start_time = float(request.args.get('t', 0))
+        audio_param = request.args.get('audio', 'auto')
+        url_start_time = float(request.args.get('t', 0))
     except ValueError:
         return 'Bad Request', 400
 
-    # When seeking to a non-zero offset, mixing -c:v copy with -c:a aac causes
-    # A/V timestamp desync: video preserves original PTS (~T) while the AAC
-    # encoder resets its clock to 0. Re-encoding video fixes the alignment.
-    if start_time > 0:
-        video_codec = ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23']
+    ua = request.headers.get('User-Agent', '')
+    is_ios = 'iPhone' in ua or 'iPad' in ua
+
+    # Parse Range header (used only for iOS path below).
+    range_header = request.headers.get('Range', '')
+    is_range_request = False
+    range_start = 0
+    range_end = None
+    if range_header:
+        m = re.match(r'bytes=(\d+)-(\d*)', range_header)
+        if m:
+            is_range_request = True
+            range_start = int(m.group(1))
+            range_end = int(m.group(2)) if m.group(2) else None
+
+    logger.info('stream_track() is_ios=%s Range="%s"', is_ios, range_header)
+
+    # ── iOS path ─────────────────────────────────────────────────────────────
+    if is_ios:
+        file_size = candidate.stat().st_size
+
+        # Small range probe (e.g. Range: bytes=0-1) — confirm range support.
+        is_probe = (
+            is_range_request and range_start == 0
+            and range_end is not None and range_end < 16
+        )
+        if is_probe:
+            null_bytes = bytes(range_end + 1)
+            resp = make_response(null_bytes, 206)
+            resp.headers['Content-Type'] = 'video/mp4'
+            resp.headers['Accept-Ranges'] = 'bytes'
+            resp.headers['Content-Range'] = (
+                f'bytes 0-{range_end}/{file_size}'
+            )
+            resp.headers['Content-Length'] = str(range_end + 1)
+            return resp
+
+        # Continuation: iOS buffered up to range_start and needs more.
+        # We use _IOS_STREAM_BITRATE_BPS (the same constant bitrate we encode
+        # at) for the byte→time conversion so the estimate is accurate.
+        is_continuation = range_start > 0
+        start_time = url_start_time
+        if is_continuation:
+            start_time = url_start_time + range_start / _IOS_STREAM_BITRATE_BPS
+            logger.info(
+                'stream_track() Continuation: bytes=%d t_url=%.2f → t=%.2fs',
+                range_start,
+                url_start_time,
+                start_time,
+            )
+
+        # Constant bitrate transcode for iOS so that byte→time stays accurate
+        # across the whole stream. zerolatency minimises encoder buffering.
+        video_codec = [
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-b:v', '1500k', '-maxrate', '2000k', '-bufsize', '3000k',
+            '-tune', 'zerolatency',
+        ]
+
+    # ── non-iOS (desktop) path ───────────────────────────────────────────────
     else:
-        video_codec = ['-c:v', 'copy']
+        is_continuation = False
+        start_time = url_start_time
+        # Copy H.264 at t=0 only — no CPU cost for the initial stream.
+        # At t>0 (seeks) we must re-encode: -c:v copy preserves source PTS
+        # (e.g. 30 s) while -c:a aac resets to 0, causing 30 s A/V desync.
+        src_codec = _get_video_codec(candidate)
+        if src_codec == 'h264' and start_time == 0:
+            video_codec = ['-c:v', 'copy']
+        else:
+            video_codec = [
+                '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23',
+            ]
+
+    # 'auto' selects the first audio stream; numeric selects by stream index.
+    if audio_param == 'auto':
+        audio_map = '0:a:0'
+    else:
+        try:
+            audio_map = f'0:{int(audio_param)}'
+        except ValueError:
+            return 'Bad Request', 400
+
+    # default_base_moof: moov contains full codec info (H.264 SPS/PPS, AAC
+    # AudioSpecificConfig) AND the correct total duration, so the browser
+    # sets video.duration correctly and the seekbar shows the full length.
+    movflags = 'frag_keyframe+default_base_moof'
 
     cmd = [
         'ffmpeg',
@@ -1317,12 +1640,12 @@ def stream_track(filename):
         '-ss', str(start_time),
         '-i', str(candidate),
         '-map', '0:v:0',
-        '-map', f'0:{audio_index}',
+        '-map', audio_map,
         *video_codec,
         '-c:a', 'aac',
-        '-b:a', '192k',
+        '-b:a', '128k' if is_ios else '192k',
         '-f', 'mp4',
-        '-movflags', 'frag_keyframe+empty_moov',
+        '-movflags', movflags,
         'pipe:1',
     ]
 
@@ -1332,43 +1655,563 @@ def stream_track(filename):
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
         )
     except FileNotFoundError:
         logger.error('stream_track() ffmpeg not found')
         return 'ffmpeg not available', 500
 
     def generate():
+        total_bytes = 0
         try:
-            while True:
-                chunk = proc.stdout.read(65536)
-                if not chunk:
-                    break
-                yield chunk
+            if is_continuation:
+                # Strip the ftyp+moov init segment — iOS already has it from
+                # the first response; re-sending it at a non-zero byte offset
+                # would confuse the MP4 parser.
+                for chunk in _skip_mp4_init_boxes(proc):
+                    total_bytes += len(chunk)
+                    yield chunk
+            else:
+                while True:
+                    chunk = proc.stdout.read(65536)
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    yield chunk
         finally:
             proc.stdout.close()
-            proc.wait()
+            rc = proc.wait()
+            logger.info(
+                'stream_track() done: bytes=%d rc=%d t=%.2f',
+                total_bytes,
+                rc,
+                start_time,
+            )
+
+    stream_headers = {
+        'Content-Type': 'video/mp4',
+        'X-Accel-Buffering': 'no',
+    }
+    if is_ios and is_range_request:
+        stream_headers['Accept-Ranges'] = 'bytes'
+        stream_headers['Content-Range'] = (
+            f'bytes {range_start}-{file_size - 1}/{file_size}'
+        )
+        status = 206
+    else:
+        status = 200
 
     return app.response_class(
         generate(),
-        status=200,
-        headers={
-            'Content-Type': 'video/mp4',
-            'X-Accel-Buffering': 'no',
-        },
+        status=status,
+        headers=stream_headers,
     )
 
 
-SUBTITLE_CACHE_DIR = DATA_DIR / 'subtitle_cache'
+SUBTITLE_CACHE_DIR = DOWNLOADS_PATH / '.cache' / 'subtitle_cache'
 SUBTITLE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+HLS_CACHE_DIR = DOWNLOADS_PATH / '.cache' / 'hls_cache'
+HLS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Image-based subtitle codecs that cannot be converted to WebVTT.
+_IMAGE_SUBTITLE_CODECS = frozenset({
+    'hdmv_pgs_subtitle', 'dvd_subtitle', 'dvdsub',
+    'dvb_subtitle', 'xsub',
+})
+
+# Per-file locks that serialize subtitle extraction so only one ffmpeg
+# pass runs per file at a time.  35 simultaneous requests → only one
+# ffmpeg process → all others wait on the lock then hit the cache.
+_subtitle_locks: dict = {}
+_subtitle_locks_mu = Lock()
+
+
+def _subtitle_lock_for(key: str) -> Lock:
+    with _subtitle_locks_mu:
+        if key not in _subtitle_locks:
+            _subtitle_locks[key] = Lock()
+        return _subtitle_locks[key]
+
+
+def _extract_all_subtitles(candidate: Path, safe_name: str) -> None:
+    """Extract all text-based subtitle tracks in a single ffmpeg pass.
+
+    Writes each track as a .vtt file in SUBTITLE_CACHE_DIR.  Must be
+    called with the per-file subtitle lock already held.
+    """
+    try:
+        result = subprocess.run(
+            [
+                'ffprobe', '-v', 'quiet',
+                '-print_format', 'json',
+                '-show_streams',
+                str(candidate),
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        data = json.loads(result.stdout)
+    except Exception as exc:
+        logger.error('_extract_all_subtitles() ffprobe failed: %s', exc)
+        return
+
+    to_extract = {
+        s['index']: SUBTITLE_CACHE_DIR / f'{safe_name}.{s["index"]}.vtt'
+        for s in data.get('streams', [])
+        if s.get('codec_type') == 'subtitle'
+        and s.get('codec_name', '') not in _IMAGE_SUBTITLE_CODECS
+        and not (
+            SUBTITLE_CACHE_DIR / f'{safe_name}.{s.get("index", 0)}.vtt'
+        ).exists()
+    }
+    if not to_extract:
+        return
+
+    cmd = [
+        'ffmpeg', '-hide_banner', '-loglevel', 'error',
+        '-i', str(candidate),
+    ]
+    for idx, out_path in to_extract.items():
+        cmd += ['-map', f'0:{idx}', '-f', 'webvtt', str(out_path)]
+
+    logger.info(
+        '_extract_all_subtitles() extracting %d tracks from %s',
+        len(to_extract), candidate.name,
+    )
+    try:
+        proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)
+        _, stderr_bytes = proc.communicate(timeout=600)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        logger.error(
+            '_extract_all_subtitles() timed out for %s', candidate.name,
+        )
+        return
+    except Exception as exc:
+        logger.error('_extract_all_subtitles() error: %s', exc)
+        return
+
+    if proc.returncode != 0:
+        logger.error(
+            '_extract_all_subtitles() ffmpeg rc=%d for %s: %s',
+            proc.returncode, candidate.name,
+            stderr_bytes.decode(errors='replace')[:500],
+        )
+        return
+
+    for idx, out_path in to_extract.items():
+        if out_path.exists():
+            logger.info(
+                '_extract_all_subtitles() cached track %d (%d bytes)',
+                idx, out_path.stat().st_size,
+            )
+        else:
+            logger.warning(
+                '_extract_all_subtitles() missing output for track %d', idx,
+            )
+
+
+# Track in-progress HLS generation to prevent duplicate workers.
+# Maps (str(candidate), audio_idx) → subprocess.Popen object.
+_hls_procs: dict = {}
+_hls_lock = Lock()
+
+
+def _hls_dir(candidate: Path, audio_idx: int) -> Path:
+    """Return the HLS cache directory for a given file + audio track index."""
+    h = hashlib.sha256(str(candidate).encode()).hexdigest()[:16]
+    return HLS_CACHE_DIR / h / str(audio_idx)
+
+
+def _hls_root(candidate: Path) -> Path:
+    """Return the HLS cache root for a file (parent of audio-track dirs)."""
+    h = hashlib.sha256(str(candidate).encode()).hexdigest()[:16]
+    return HLS_CACHE_DIR / h
+
+
+def _clear_file_caches(candidate: Path) -> None:
+    """Delete HLS and subtitle caches for a given source file."""
+    hls_root = _hls_root(candidate)
+    if hls_root.exists():
+        shutil.rmtree(hls_root, ignore_errors=True)
+        logger.info('_clear_file_caches() HLS cache removed: %s', hls_root)
+
+    try:
+        rel = str(candidate.relative_to(DOWNLOADS_PATH.resolve()))
+    except ValueError:
+        rel = str(candidate)
+    safe_name = rel.replace(os.sep, '_')
+    for vtt in SUBTITLE_CACHE_DIR.glob(f'{safe_name}.*.vtt'):
+        vtt.unlink(missing_ok=True)
+        logger.info('_clear_file_caches() subtitle cache removed: %s', vtt)
+
+
+_HLS_MIN_SEGMENTS = 3  # segments before we let the player start
+
+
+def _hls_ready(candidate: Path, audio_idx: int) -> bool:
+    """Return True if enough HLS segments exist to start playback.
+
+    Returns True as soon as _HLS_MIN_SEGMENTS .ts files are on disk so the
+    player can start immediately while ffmpeg continues generating the rest.
+    Also returns True once the .done marker exists (fully generated).
+
+    Segments that exist without either .done or .generating are stale (a
+    previous generation run was killed).  We return False in that case so
+    hls_status() will wipe and restart generation.
+    """
+    hls_d = _hls_dir(candidate, audio_idx)
+    done_f = hls_d / '.done'
+    if done_f.exists():
+        # Sanity check: playlist must also exist.  If it doesn't, the cache
+        # is corrupt (segments deleted externally, interrupted write, etc.).
+        # Remove .done so hls_status() can restart generation cleanly.
+        if not (hls_d / 'playlist.m3u8').exists():
+            logger.warning(
+                '_hls_ready() corrupt cache (no playlist), clearing .done:'
+                ' %s audio=%d',
+                candidate.name, audio_idx,
+            )
+            done_f.unlink(missing_ok=True)
+            return False
+        return True
+    key = (str(candidate), audio_idx)
+    with _hls_lock:
+        active = key in _hls_procs and _hls_procs[key].poll() is None
+    if active or (hls_d / '.generating').exists():
+        return sum(1 for _ in hls_d.glob('seg*.ts')) >= _HLS_MIN_SEGMENTS
+    return False
+
+
+def _latest_seg_num(hls_d: Path) -> int:
+    """Return highest seg*.ts number on disk, or -1 if none."""
+    segs = list(hls_d.glob('seg*.ts'))
+    if not segs:
+        return -1
+    return max(int(f.stem[3:]) for f in segs)
+
+
+def _generate_hls_bg(
+        candidate: Path,
+        audio_idx: int,
+        start_seg: int = 0,
+) -> None:
+    """Generate HLS segments for one audio track in a background thread.
+
+    Uses -c:v copy when source is already H.264 (remux only, near-zero CPU),
+    encodes to H.264 otherwise.  Audio always transcoded to AAC.
+
+    When start_seg > 0 (seek restart) any existing ffmpeg proc for this key is
+    killed and a new one is started at the requested segment position.
+    """
+    key = (str(candidate), audio_idx)
+    with _hls_lock:
+        active = key in _hls_procs and _hls_procs[key].poll() is None
+        if start_seg == 0 and active:
+            return
+        if start_seg > 0:
+            # Collapse concurrent seek restarts: if a restart for this key is
+            # already in progress (proc is active), bail out.  The first caller
+            # wins; subsequent segment-request threads will keep polling.
+            if active:
+                return
+            existing = _hls_procs.get(key)
+            if existing is not None and existing.poll() is None:
+                existing.terminate()
+
+    hls_d = _hls_dir(candidate, audio_idx)
+    hls_d.mkdir(parents=True, exist_ok=True)
+    playlist = hls_d / 'playlist.m3u8'
+    done = hls_d / '.done'
+    generating_marker = hls_d / '.generating'
+
+    if start_seg == 0:
+        if done.exists():
+            return
+
+        # Cross-worker guard: another worker may already be running ffmpeg.
+        if generating_marker.exists():
+            return
+
+        # Clean up stale partial run (killed ffmpeg, no .done, no .generating).
+        if not generating_marker.exists() and any(hls_d.glob('seg*.ts')):
+            logger.warning(
+                '_generate_hls_bg() stale cache, cleaning: %s audio=%d',
+                candidate.name, audio_idx,
+            )
+            for f in hls_d.glob('seg*.ts'):
+                f.unlink(missing_ok=True)
+            for f in (playlist,):
+                if f.exists():
+                    f.unlink()
+
+    generating_marker.touch()
+
+    if start_seg == 0:
+        # Store duration before ffmpeg starts. hls_playlist() uses this to
+        # serve a dynamically-built VOD playlist (with #EXT-X-ENDLIST) instead
+        # of ffmpeg's live playlist, giving the player a full seekbar from the
+        # first request.
+        duration = _get_video_duration(candidate)
+        if duration:
+            (hls_d / 'duration.txt').write_text(str(duration))
+
+    vcodec = _get_video_codec(candidate)
+    pix_fmt = _get_video_pix_fmt(candidate)
+    # Copy H.264 8-bit to avoid re-encoding (segments appear in seconds).
+    # h264_mp4toannexb converts AVCC→Annex B required by MPEG-TS.
+    # Non-H.264 or 10-bit sources are encoded to ensure browser compatibility.
+    if vcodec == 'h264' and pix_fmt == 'yuv420p':
+        video_args = ['-c:v', 'copy', '-bsf:v', 'h264_mp4toannexb']
+    else:
+        video_args = [
+            '-c:v', 'libx264', '-preset', 'veryfast',
+            '-crf', '23', '-pix_fmt', 'yuv420p',
+        ]
+
+    seek_args = []
+    if start_seg > 0:
+        seek_args = ['-ss', str(start_seg * _HLS_SEGMENT_TIME)]
+
+    cmd = [
+        'ffmpeg', '-hide_banner', '-loglevel', 'error',
+        *seek_args,
+        '-i', str(candidate),
+        '-map', '0:v:0',
+        # absolute stream index, same as subtitle_track
+        '-map', f'0:{audio_idx}',
+        *video_args,
+        '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
+        '-f', 'hls',
+        '-hls_time', str(_HLS_SEGMENT_TIME),
+        '-hls_list_size', '0',
+        '-hls_flags', 'independent_segments',
+        '-start_number', str(start_seg),
+        '-hls_segment_filename', str(hls_d / 'seg%05d.ts'),
+        str(playlist),
+    ]
+    logger.info(
+        '_generate_hls_bg() start: %s audio=%d start_seg=%d',
+        candidate.name, audio_idx, start_seg,
+    )
+    proc = None
+    try:
+        proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)
+        with _hls_lock:
+            _hls_procs[key] = proc
+        _, stderr_bytes = proc.communicate(timeout=7200)
+        if proc.returncode == 0 and start_seg == 0:
+            done.touch()
+            logger.info(
+                '_generate_hls_bg() done: %s audio=%d',
+                candidate.name, audio_idx,
+            )
+        elif proc.returncode not in (0, -15, -9, 255):
+            # -15/-9 = killed by signal; 255 = ffmpeg's clean SIGTERM exit
+            stderr_text = (
+                (stderr_bytes or b'').decode('utf-8', errors='replace').strip()
+            )
+            logger.error(
+                '_generate_hls_bg() rc=%d: %s audio=%d\n%s',
+                proc.returncode, candidate.name, audio_idx, stderr_text,
+            )
+            # Clean up partial segments so _hls_ready won't return True on
+            # stale corrupt data (avoids MEDIA_ERR_SRC_NOT_SUPPORTED).
+            for f in hls_d.glob('seg*.ts'):
+                f.unlink(missing_ok=True)
+            playlist.unlink(missing_ok=True)
+    except Exception as exc:
+        logger.exception('_generate_hls_bg() exception: %s', exc)
+    finally:
+        generating_marker.unlink(missing_ok=True)
+        with _hls_lock:
+            if _hls_procs.get(key) is proc:
+                del _hls_procs[key]
+
+
+@app.route('/hls-cancel/<path:filename>', methods=['POST'])
+def hls_cancel(filename):
+    """Terminate any active HLS generation for a file (all audio tracks).
+
+    Called by the player when the user navigates away so server resources
+    are freed immediately instead of continuing to encode unused video.
+    """
+    root = DOWNLOADS_PATH.resolve()
+    candidate = (root / filename).resolve()
+    if not str(candidate).startswith(str(root) + os.sep):
+        return 'Forbidden', 403
+
+    candidate_str = str(candidate)
+    killed = 0
+    with _hls_lock:
+        for key, proc in list(_hls_procs.items()):
+            if key[0] == candidate_str and proc.poll() is None:
+                proc.terminate()
+                del _hls_procs[key]
+                # Remove .generating immediately so _hls_ready returns False
+                # on the next poll — prevents a reloading page from seeing
+                # the dying process as "active" (MEDIA_ERR_SRC_NOT_SUPPORTED).
+                _hls_dir(candidate, key[1]).joinpath('.generating').unlink(
+                    missing_ok=True,
+                )
+                killed += 1
+                logger.info(
+                    'hls_cancel() terminated ffmpeg: %s audio=%d',
+                    candidate.name, key[1],
+                )
+
+    return jsonify({'status': 'cancelled', 'killed': killed})
+
+
+@app.route('/hls-status/<path:filename>')
+def hls_status(filename):
+    """Return HLS generation status; kick off generation if not started."""
+    root = DOWNLOADS_PATH.resolve()
+    candidate = (root / filename).resolve()
+    if not str(candidate).startswith(str(root) + os.sep):
+        return 'Forbidden', 403
+    if not candidate.exists() or not candidate.is_file():
+        return 'Not Found', 404
+
+    try:
+        audio_idx = int(request.args.get('audio', 0))
+    except ValueError:
+        return 'Bad Request', 400
+
+    if _hls_ready(candidate, audio_idx):
+        return jsonify({'status': 'ready'})
+
+    key = (str(candidate), audio_idx)
+    with _hls_lock:
+        generating = key in _hls_procs and _hls_procs[key].poll() is None
+
+    if not generating:
+        Thread(
+            target=_generate_hls_bg,
+            args=(candidate, audio_idx),
+            daemon=True,
+        ).start()
+
+    return jsonify({'status': 'generating'}), 202
+
+
+@app.route('/hls/<path:filename>/<int:audio_idx>/playlist.m3u8')
+def hls_playlist(filename, audio_idx):
+    """Serve the HLS m3u8 playlist, triggering generation if needed.
+
+    The playlist is served as soon as _HLS_MIN_SEGMENTS segments exist, even
+    while ffmpeg is still running.  Without #EXT-X-ENDLIST hls.js treats it as
+    a live stream and re-polls, picking up new segments automatically.  Once
+    ffmpeg finishes and writes .done, the playlist gains #EXT-X-ENDLIST and
+    hls.js switches to full VOD mode (seekable full-length bar).
+    """
+    root = DOWNLOADS_PATH.resolve()
+    candidate = (root / filename).resolve()
+    if not str(candidate).startswith(str(root) + os.sep):
+        return 'Forbidden', 403
+    if not candidate.exists() or not candidate.is_file():
+        return 'Not Found', 404
+
+    if not _hls_ready(candidate, audio_idx):
+        key = (str(candidate), audio_idx)
+        with _hls_lock:
+            generating = key in _hls_procs and _hls_procs[key].poll() is None
+        if not generating:
+            Thread(
+                target=_generate_hls_bg,
+                args=(candidate, audio_idx),
+                daemon=True,
+            ).start()
+        return jsonify({'status': 'generating'}), 202
+
+    hls_d = _hls_dir(candidate, audio_idx)
+    if not (hls_d / 'playlist.m3u8').exists():
+        return jsonify({'status': 'generating'}), 202
+
+    done_file = hls_d / '.done'
+    dur_file = hls_d / 'duration.txt'
+
+    if done_file.exists():
+        # Serve ffmpeg's actual playlist — exact EXTINF for subtitle sync
+        response = make_response(
+            send_file(
+                str(hls_d / 'playlist.m3u8'),
+                mimetype='application/vnd.apple.mpegurl',
+            ),
+        )
+        response.headers['Cache-Control'] = 'public, max-age=3600'
+        return response
+
+    # Still generating: serve dynamic VOD playlist (full seekbar, ~timings)
+    if dur_file.exists():
+        try:
+            duration = float(dur_file.read_text().strip())
+            response = make_response(_build_vod_playlist(duration), 200)
+            response.headers['Content-Type'] = 'application/vnd.apple.mpegurl'
+            response.headers['Cache-Control'] = 'no-store'
+            return response
+        except Exception:
+            pass
+
+    return jsonify({'status': 'generating'}), 202
+
+
+@app.route('/hls/<path:filename>/<int:audio_idx>/<segment>')
+def hls_segment(filename, audio_idx, segment):
+    """Serve an HLS .ts segment, waiting up to 60 s for it to be generated."""
+    root = DOWNLOADS_PATH.resolve()
+    candidate = (root / filename).resolve()
+    if not str(candidate).startswith(str(root) + os.sep):
+        return 'Forbidden', 403
+
+    hls_d = _hls_dir(candidate, audio_idx)
+    target = (hls_d / segment).resolve()
+    if not str(target).startswith(str(hls_d.resolve())):
+        return 'Forbidden', 403
+
+    # Parse segment number: seg00450.ts → 450
+    try:
+        seg_num = int(segment[3:segment.index('.')])
+    except (ValueError, IndexError):
+        return 'Not Found', 404
+
+    deadline = time.time() + 60
+    restarted = False
+    while not target.exists() and time.time() < deadline:
+        time.sleep(0.5)
+        if not restarted and time.time() > deadline - 57:  # after ~3s waiting
+            latest = _latest_seg_num(hls_d)
+            if seg_num > latest + 30:  # more than 30 segments ahead (120s)
+                restarted = True
+                start_from = max(0, seg_num - 2)
+                logger.info(
+                    'hls_segment() seek restart: seg=%d latest=%d file=%s',
+                    seg_num, latest, candidate.name,
+                )
+                Thread(
+                    target=_generate_hls_bg,
+                    args=(candidate, audio_idx, start_from),
+                    daemon=True,
+                ).start()
+
+    if not target.exists():
+        return 'Not Found', 404
+
+    response = make_response(send_file(str(target), mimetype='video/MP2T'))
+    # Segments are immutable once written — safe to cache aggressively.
+    response.headers['Cache-Control'] = 'public, max-age=86400, immutable'
+    return response
 
 
 @app.route('/subtitle-track/<path:filename>')
 def subtitle_track(filename):
     """Extract a subtitle stream as WebVTT for client-side rendering.
 
-    Extracted VTT files are cached under DATA_DIR/subtitle_cache so that
-    only the first request for a given file+track is slow.
+    All text-based subtitle tracks are extracted in a single ffmpeg pass
+    and cached under SUBTITLE_CACHE_DIR.  Concurrent requests for the same
+    file wait on a per-file lock so only one ffmpeg process runs at a time;
+    subsequent requests are served directly from cache.
     """
     root = DOWNLOADS_PATH.resolve()
     candidate = (root / filename).resolve()
@@ -1386,10 +2229,10 @@ def subtitle_track(filename):
     safe_name = filename.replace(os.sep, '_')
     cache_file = SUBTITLE_CACHE_DIR / f'{safe_name}.{stream_index}.vtt'
 
+    # Fast path: already cached — no lock needed
     if cache_file.exists():
         logger.info(
-            'subtitle_track() Cache hit for index %d from %s',
-            stream_index, filename,
+            'subtitle_track() cache hit index=%d %s', stream_index, filename,
         )
         return app.response_class(
             cache_file.read_bytes(),
@@ -1397,55 +2240,30 @@ def subtitle_track(filename):
             headers={'Content-Type': 'text/vtt; charset=utf-8'},
         )
 
-    logger.info(
-        'subtitle_track() Extracting index %d from %s', stream_index, filename,
-    )
+    # Extract all subtitle tracks in one ffmpeg pass, serialized per file
+    lock = _subtitle_lock_for(safe_name)
+    with lock:
+        # Re-check under lock: another greenlet may have just extracted it
+        if cache_file.exists():
+            logger.info(
+                'subtitle_track() cache hit index=%d %s (post-lock)',
+                stream_index, filename,
+            )
+        else:
+            _extract_all_subtitles(candidate, safe_name)
 
-    cmd = [
-        'ffmpeg',
-        '-hide_banner',
-        '-loglevel', 'error',
-        '-i', str(candidate),
-        '-map', f'0:{stream_index}',
-        '-f', 'webvtt',
-        'pipe:1',
-    ]
-    try:
-        proc = gevent.subprocess.Popen(
-            cmd,
-            stdout=gevent.subprocess.PIPE,
-            stderr=gevent.subprocess.DEVNULL,
-        )
-    except FileNotFoundError:
-        logger.error('subtitle_track() ffmpeg not found')
-        return 'ffmpeg not available', 500
-
-    try:
-        vtt_bytes, _ = proc.communicate(timeout=300)
-    except gevent.subprocess.TimeoutExpired:
-        proc.kill()
-        proc.communicate()
-        logger.error('subtitle_track() ffmpeg timed out')
-        return 'Subtitle extraction timed out', 500
-    except Exception as exc:
-        proc.kill()
-        logger.error('subtitle_track() read error: %s', exc)
-        return 'Subtitle extraction failed', 500
-
-    if proc.returncode != 0 or not vtt_bytes:
+    if not cache_file.exists():
         logger.error(
-            'subtitle_track() ffmpeg failed, rc=%d bytes=%d',
-            proc.returncode, len(vtt_bytes),
+            'subtitle_track() extraction failed index=%d %s',
+            stream_index, filename,
         )
         return 'Subtitle extraction failed', 500
 
-    cache_file.write_bytes(vtt_bytes)
     logger.info(
-        'subtitle_track() done, %d bytes, cached to %s',
-        len(vtt_bytes), cache_file.name,
+        'subtitle_track() serving index=%d %s', stream_index, filename,
     )
     return app.response_class(
-        vtt_bytes,
+        cache_file.read_bytes(),
         status=200,
         headers={'Content-Type': 'text/vtt; charset=utf-8'},
     )
