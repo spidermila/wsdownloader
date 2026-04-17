@@ -16,7 +16,7 @@ LABEL org.opencontainers.image.title="wsdownloader" \
       org.opencontainers.image.created=$BUILD_DATE
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    tini curl procps \
+    tini curl procps ffmpeg\
  && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONUNBUFFERED=1 \

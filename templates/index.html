@@ -57,6 +57,11 @@
             </div>
           </div>
           <div class="col-auto d-flex align-items-center gap-2">
+            <div class="form-check form-switch m-0">
+              <input class="form-check-input" type="checkbox" role="switch"
+                    id="play_enabled" onchange="togglePlayButtons(this.checked)">
+              <label class="form-check-label small" for="play_enabled">Přehrávání</label>
+            </div>
             <form method="post" action="{{ url_for('update_dark_mode') }}" class="form-check form-switch m-0">
               <input class="form-check-input" type="checkbox" role="switch"
                     id="dark_mode" name="dark_mode"
@@ -215,6 +220,7 @@
         {% endfor %}
       {% endif %}
     {% endwith %}
+    <div id="flash-container"></div>
 
     <div id="links-container">
       {% if links and links|length > 0 %}
@@ -317,6 +323,14 @@
                   </td>
                   <td class="d-none d-sm-table-cell">{{ f.size }}</td>
                   <td class="actions-cell">
+                    {% set ext = f.name.rsplit('.', 1)[-1].lower() if '.' in f.name else '' %}
+                    {% if ext in ['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'wmv', 'm4v', 'ts', 'mpeg', 'mpg'] %}
+                    <a href="{{ url_for('player', filename=f.name) }}"
+                       class="btn btn-sm btn-outline-success me-1 play-btn"
+                       aria-label="Přehrát {{ f.name }}">
+                      ▶ Přehrát
+                    </a>
+                    {% endif %}
                     <button type="button" class="btn btn-sm btn-outline-secondary me-1" onclick="startRename(this)" aria-label="Přejmenovat {{ f.name }}">
                       Přejmenovat
                     </button>
@@ -345,6 +359,49 @@
 
     const fsProgress = document.getElementById('fs-progress');
     const fsText = document.getElementById('fs-text');
+
+    // ── Play button toggle ────────────────────────────────────────────────────
+    function playEnabled() {
+      return localStorage.getItem('playEnabled') === '1';
+    }
+
+    function showFlashMessage(text, category, timeout) {
+      const container = document.getElementById('flash-container');
+      if (!container) return;
+      const div = document.createElement('div');
+      div.className = `alert alert-${category} py-2 mt-3`;
+      div.setAttribute('role', 'alert');
+      div.innerHTML = text;
+      container.appendChild(div);
+      setTimeout(() => {
+        div.style.transition = 'opacity 0.3s ease-out';
+        div.style.opacity = '0';
+        setTimeout(() => div.remove(), 300);
+      }, timeout || 6000);
+    }
+
+    function togglePlayButtons(enabled) {
+      localStorage.setItem('playEnabled', enabled ? '1' : '0');
+      document.querySelectorAll('.play-btn').forEach(el => {
+        el.classList.toggle('d-none', !enabled);
+      });
+      if (enabled) {
+        showFlashMessage(
+          '⚠️ <strong>Upozornění:</strong> Přehrávání videa výrazně zvyšuje zatížení CPU serveru.',
+          'warning', 6000,
+        );
+      }
+    }
+
+    // Restore toggle state on page load
+    (function() {
+      const enabled = playEnabled();
+      const toggle = document.getElementById('play_enabled');
+      if (toggle) toggle.checked = enabled;
+      if (!enabled) {
+        document.querySelectorAll('.play-btn').forEach(el => el.classList.add('d-none'));
+      }
+    })();
 
     // Track if user is currently renaming a file
     let isRenaming = false;
@@ -427,18 +484,30 @@
       files.forEach(f => {
         const tr = document.createElement('tr');
         tr.dataset.filename = f.name;
+        const playBtn = isVideoFile(f.name)
+          ? `<a href="/player/${encodeURIComponent(f.name)}"
+               class="btn btn-sm btn-outline-success me-1 play-btn${playEnabled() ? '' : ' d-none'}"
+               aria-label="Přehrát ${f.name}">
+              ▶ Přehrát
+             </a>`
+          : '';
         tr.innerHTML = `
           <td class="fw-semibold text-break col-filename">
             <span class="filename-display">${f.name}</span>
           </td>
           <td class="d-none d-sm-table-cell">${f.size}</td>
           <td class="actions-cell">
+            ${playBtn}
             <button type="button" class="btn btn-sm btn-outline-secondary me-1" onclick="startRename(this)" aria-label="Přejmenovat ${f.name}">
               Přejmenovat
             </button>
-            <form method="post" action="{{ url_for('delete_file') }}" class="d-inline">
+            <form method="post"
+              action="{{ url_for('delete_file') }}"
+              class="d-inline">
               <input type="hidden" name="filename" value="${f.name}">
-              <button type="submit" class="btn btn-sm btn-danger" aria-label="Odstranit ${f.name}">
+              <button type="submit"
+                  class="btn btn-sm btn-danger"
+                  aria-label="Odstranit ${f.name}">
                 Smazat
               </button>
             </form>
@@ -702,6 +771,11 @@
         `<span class="filename-display">${escapedName}</span>`;
 
       actionsCell.innerHTML = `
+        <a href="/player/${encodeURIComponent(filename)}"
+           class="btn btn-sm btn-outline-success me-1 play-btn${playEnabled() ? '' : ' d-none'}"
+           aria-label="Přehrát ${escapedName}">
+          ▶ Přehrát
+        </a>
         <button type="button"
                 class="btn btn-sm btn-outline-secondary me-1"
                 onclick="startRename(this)"
@@ -724,6 +798,16 @@
     function updateRenamingState() {
       const editingRows = document.querySelectorAll('tr[data-editing="true"]');
       isRenaming = editingRows.length > 0;
+    }
+
+    const VIDEO_EXTENSIONS = new Set([
+      'mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'wmv', 'm4v', 'ts', 'mpeg', 'mpg'
+    ]);
+
+    function isVideoFile(filename) {
+      const dot = filename.lastIndexOf('.');
+      if (dot < 0) return false;
+      return VIDEO_EXTENSIONS.has(filename.slice(dot + 1).toLowerCase());
     }
   </script>
 </body>
