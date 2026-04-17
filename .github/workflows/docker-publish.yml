@@ -10,15 +10,30 @@ on:
         description: "Also push :latest tag"
         required: false
         default: "true"
+  pull_request:
+    types: [labeled]
 
 jobs:
   publish:
-    if: github.ref == 'refs/heads/main'
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' && github.event.label.name == 'publish-preview')
     runs-on: [self-hosted, linux, x64]
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
+
+      - name: Determine image tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "tag=pr${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+            echo "push_latest=false" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ inputs.version }}" >> $GITHUB_OUTPUT
+            echo "push_latest=${{ inputs.push_latest }}" >> $GITHUB_OUTPUT
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -29,15 +44,15 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push versioned image
+      - name: Build and push image
         run: |
           docker build \
-            -t spidermila/wsdownloader:${{ inputs.version }} \
+            -t spidermila/wsdownloader:${{ steps.meta.outputs.tag }} \
             .
-          docker push spidermila/wsdownloader:${{ inputs.version }}
+          docker push spidermila/wsdownloader:${{ steps.meta.outputs.tag }}
 
       - name: Tag and push latest
-        if: inputs.push_latest == 'true'
+        if: steps.meta.outputs.push_latest == 'true'
         run: |
-          docker tag spidermila/wsdownloader:${{ inputs.version }} spidermila/wsdownloader:latest
+          docker tag spidermila/wsdownloader:${{ steps.meta.outputs.tag }} spidermila/wsdownloader:latest
           docker push spidermila/wsdownloader:latest
