@@ -1,0 +1,8 @@
+# Production dependencies
+Flask
+Flask-SocketIO
+gunicorn
+passlib
+gevent
+gevent-websocket
+requests
