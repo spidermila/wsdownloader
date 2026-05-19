@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # Keep GitHub Actions up to date
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+
+  # Keep Python dependencies up to date
+  # Dependabot follows the -r reference in requirements.txt to requirements/prod.txt
+  # and updates pinned versions + hashes in place
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
