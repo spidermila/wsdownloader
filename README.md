@@ -2,6 +2,8 @@
 
 [![Docker Pulls](https://img.shields.io/docker/pulls/spidermila/wsdownloader?style=flat-square)](https://hub.docker.com/r/spidermila/wsdownloader)
 [![Docker Image Version](https://img.shields.io/docker/v/spidermila/wsdownloader?sort=semver)](https://hub.docker.com/r/spidermila/wsdownloader)
+![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/spidermila/wsdownloader?utm_source=oss&utm_medium=github&utm_campaign=spidermila%2Fwsdownloader&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
+
 
 ```bash
 docker pull spidermila/wsdownloader
