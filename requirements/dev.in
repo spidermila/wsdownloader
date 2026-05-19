@@ -1,0 +1,5 @@
+# Development dependencies (includes all production deps)
+-r prod.txt
+
+# Pre-commit hook runner (linting/formatting managed by pre-commit in isolated envs)
+pre-commit
