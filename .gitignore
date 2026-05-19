@@ -5,3 +5,5 @@ dev_run.sh
 dev_refresh.sh
 run.sh
 publish-image.sh
+.github/copilot-instructions.md
+dev_sync.sh
