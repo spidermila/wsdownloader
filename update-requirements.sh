@@ -80,13 +80,14 @@ trap 'rm -rf "$TMPDIR_DIFF"' EXIT
 echo "Using ${PYTHON_IMAGE} to compile requirements..."
 
 docker run --rm \
-    -v "${REQ_DIR}:/req" \
+    -v "${REQ_DIR}:/requirements" \
     "${PYTHON_IMAGE}" \
     bash -c "
         pip install pip-tools -q
-        pip-compile --generate-hashes ${UPGRADE_FLAG} --output-file /req/prod.txt /req/prod.in
-        pip-compile --generate-hashes ${UPGRADE_FLAG} --output-file /req/dev.txt /req/dev.in
-        chown $(id -u):$(id -g) /req/prod.txt /req/dev.txt
+        cd /
+        pip-compile --generate-hashes ${UPGRADE_FLAG} --output-file requirements/prod.txt requirements/prod.in
+        pip-compile --generate-hashes ${UPGRADE_FLAG} --output-file requirements/dev.txt requirements/dev.in
+        chown $(id -u):$(id -g) requirements/prod.txt requirements/dev.txt
     "
 
 show_diff "prod" "${TMPDIR_DIFF}/prod.txt.old" "${REQ_DIR}/prod.txt"
