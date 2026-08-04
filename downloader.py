@@ -45,6 +45,21 @@ DOWNLOADS_PATH.mkdir(parents=True, exist_ok=True)
 
 BASE_URL = 'https://webshare.cz/api/'
 
+# SQLite's INTEGER columns are signed 64-bit; reject sizes outside that
+# range (as well as negative sizes) instead of trying to store them.
+MAX_SIZE_BYTES = 2 ** 63 - 1
+
+
+def _validate_size_bytes(size_bytes: int) -> Optional[int]:
+    """Return size_bytes if it's a plausible, storable file size, else None."""
+    if size_bytes < 0 or size_bytes > MAX_SIZE_BYTES:
+        logger.warning(
+            '_validate_size_bytes() Rejected out-of-range size: %d',
+            size_bytes,
+        )
+        return None
+    return size_bytes
+
 
 def _parse_total_size_from_content_range(content_range: str) -> int | None:
     """
@@ -146,7 +161,10 @@ def _store_queue_file_size(row_id: int, file: dict) -> None:
             size_raw, row_id,
         )
         return
-    set_file_size_by_id(row_id, size_bytes)
+    validated_size_bytes = _validate_size_bytes(size_bytes)
+    if validated_size_bytes is None:
+        return
+    set_file_size_by_id(row_id, validated_size_bytes)
 
 
 def set_status_downloaded_by_id(row_id: int, new_status: str) -> bool:

@@ -53,6 +53,51 @@ def test_store_queue_file_size_ignores_missing_size(downloader_module):
     assert row['size_bytes'] == 0
 
 
+def test_store_queue_file_size_rejects_negative_size(downloader_module):
+    _added, _url, row_id = downloader_module.add_link_if_new(
+        'https://example.com/a.mp4',
+    )
+
+    downloader_module._store_queue_file_size(
+        row_id, {'ident': 'abc123', 'name': 'a.mp4', 'size': '-1'},
+    )
+
+    row = downloader_module.fetch_oldest()
+    assert row['size_bytes'] == 0
+
+
+def test_store_queue_file_size_rejects_size_above_int64_max(
+    downloader_module,
+):
+    _added, _url, row_id = downloader_module.add_link_if_new(
+        'https://example.com/a.mp4',
+    )
+
+    downloader_module._store_queue_file_size(
+        row_id, {
+            'ident': 'abc123', 'name': 'a.mp4', 'size': str(2 ** 63),
+        },
+    )
+
+    row = downloader_module.fetch_oldest()
+    assert row['size_bytes'] == 0
+
+
+def test_store_queue_file_size_accepts_int64_max_size(downloader_module):
+    _added, _url, row_id = downloader_module.add_link_if_new(
+        'https://example.com/a.mp4',
+    )
+
+    downloader_module._store_queue_file_size(
+        row_id, {
+            'ident': 'abc123', 'name': 'a.mp4', 'size': str(2 ** 63 - 1),
+        },
+    )
+
+    row = downloader_module.fetch_oldest()
+    assert row['size_bytes'] == 2 ** 63 - 1
+
+
 def test_store_queue_file_size_ignores_unparseable_size(downloader_module):
     _added, _url, row_id = downloader_module.add_link_if_new(
         'https://example.com/a.mp4',

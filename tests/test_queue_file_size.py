@@ -42,6 +42,52 @@ def test_test_url_without_content_length_returns_none_size(
     assert size is None
 
 
+def test_test_url_rejects_negative_content_length(app_module, monkeypatch):
+    def fake_head(url, allow_redirects=True):
+        return _FakeHeadResponse(
+            status_code=200, headers={'Content-Length': '-1'},
+        )
+
+    monkeypatch.setattr(app_module.requests, 'head', fake_head)
+
+    ok, size = app_module.test_url('https://example.com/file.bin')
+
+    assert ok is True
+    assert size is None
+
+
+def test_test_url_rejects_content_length_above_int64_max(
+    app_module, monkeypatch,
+):
+    def fake_head(url, allow_redirects=True):
+        return _FakeHeadResponse(
+            status_code=200,
+            headers={'Content-Length': str(2 ** 63)},
+        )
+
+    monkeypatch.setattr(app_module.requests, 'head', fake_head)
+
+    ok, size = app_module.test_url('https://example.com/file.bin')
+
+    assert ok is True
+    assert size is None
+
+
+def test_test_url_accepts_int64_max_content_length(app_module, monkeypatch):
+    def fake_head(url, allow_redirects=True):
+        return _FakeHeadResponse(
+            status_code=200,
+            headers={'Content-Length': str(2 ** 63 - 1)},
+        )
+
+    monkeypatch.setattr(app_module.requests, 'head', fake_head)
+
+    ok, size = app_module.test_url('https://example.com/file.bin')
+
+    assert ok is True
+    assert size == 2 ** 63 - 1
+
+
 def test_test_url_unreachable_link_returns_false_and_none(
     app_module, monkeypatch,
 ):

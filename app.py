@@ -83,6 +83,22 @@ DOWNLOADS_PATH.mkdir(parents=True, exist_ok=True)
 
 BASE_URL = 'https://webshare.cz/api/'
 
+# SQLite's INTEGER columns are signed 64-bit; reject sizes outside that
+# range (as well as negative sizes) instead of trying to store them.
+MAX_SIZE_BYTES = 2 ** 63 - 1
+
+
+def _validate_size_bytes(size_bytes: int) -> Optional[int]:
+    """Return size_bytes if it's a plausible, storable file size, else None."""
+    if size_bytes < 0 or size_bytes > MAX_SIZE_BYTES:
+        logger.warning(
+            '_validate_size_bytes() Rejected out-of-range size: %d',
+            size_bytes,
+        )
+        return None
+    return size_bytes
+
+
 _appHasRunBefore = False
 
 socketio = SocketIO(app, cors_allowed_origins='*', async_mode='gevent')
@@ -454,7 +470,7 @@ def test_url(url: str) -> tuple[bool, Optional[int]]:
         size_bytes = None
         if content_length is not None:
             try:
-                size_bytes = int(content_length)
+                size_bytes = _validate_size_bytes(int(content_length))
             except ValueError:
                 size_bytes = None
         return (True, size_bytes)
