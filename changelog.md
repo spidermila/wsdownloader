@@ -2,6 +2,11 @@
 
 Docker image changelog:
 
+## 0.5.0
+(released 4-Aug-2026)
+- Show file sizes for files waiting in the download queue, plus a total queue size, so you know how much space to free up
+- File sizes are now captured as soon as a link is added to the queue (for both Webshare and manually added links), instead of only once the download starts
+
 ## 0.4.0
 (released 18-Apr-2026)
 - Added a player to the web app. Now you can play the video files in your browser.
