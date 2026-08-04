@@ -129,6 +129,26 @@ def set_file_size_by_id(row_id: int, size_bytes: int) -> bool:
         return False
 
 
+def _store_queue_file_size(row_id: int, file: dict) -> None:
+    """
+    Store the file size reported by the Webshare queue API (the 'size'
+    field, in bytes) for a newly added link, so the queue size is known
+    without waiting for the file to start downloading.
+    """
+    size_raw = file.get('size')
+    if not size_raw:
+        return
+    try:
+        size_bytes = int(size_raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            '_store_queue_file_size() Unparseable size %r for row_id=%d',
+            size_raw, row_id,
+        )
+        return
+    set_file_size_by_id(row_id, size_bytes)
+
+
 def set_status_downloaded_by_id(row_id: int, new_status: str) -> bool:
     db = get_db()
     try:
@@ -515,11 +535,11 @@ def dequeue_file(token: str, file_id) -> str | None:
     return None
 
 
-def add_link_if_new(link_raw: str) -> tuple[bool, str]:
+def add_link_if_new(link_raw: str) -> tuple[bool, str, Optional[int]]:
     url = (link_raw or '').strip()
     if not url:
         logger.warning('add_link_if_new() Invalid URL: %s', link_raw)
-        return (False, '')
+        return (False, '', None)
 
     db = get_db()
     try:
@@ -529,6 +549,7 @@ def add_link_if_new(link_raw: str) -> tuple[bool, str]:
         )
         db.commit()
         added = cur.rowcount > 0
+        row_id = cur.lastrowid if added else None
         if added:
             logger.info('add_link_if_new() Added new link to DB: %s', url)
         else:
@@ -536,12 +557,12 @@ def add_link_if_new(link_raw: str) -> tuple[bool, str]:
                 'add_link_if_new() Link already exists in DB, not added: %s',
                 url,
             )
-        return (added, url)
+        return (added, url, row_id)
     except sqlite3.Error:
         logger.error(
             'add_link_if_new() Database error while adding link: %s', url,
         )
-        return (False, url)
+        return (False, url, None)
 
 
 def log_download_error(
@@ -594,9 +615,11 @@ def main_loop() -> None:
                             'file_id=%s, file_name=%s and adding it to '
                             'the local queue', file_id, file_name,
                         )
-                        add_status, _ = add_link_if_new(link)
+                        add_status, _, row_id = add_link_if_new(link)
                         if add_status:
                             dequeue_file(token, file_id)
+                            if row_id is not None:
+                                _store_queue_file_size(row_id, file)
                     else:
                         logger.warning(
                             'main_loop() Failed to retrieve download link '
