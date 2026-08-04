@@ -441,19 +441,31 @@ def validate_url(url) -> str:
     return 'ok'
 
 
-def test_url(url: str) -> bool:
-    response = requests.head(url)
+def test_url(url: str) -> tuple[bool, Optional[int]]:
+    """
+    Probe a URL with a HEAD request. Returns whether it is reachable and,
+    when available, its size in bytes (from the Content-Length header).
+    This works for any HTTP(S) link, not just Webshare ones.
+    """
+    response = requests.head(url, allow_redirects=True)
     if response.status_code == 200:
         logger.info('URL test succeeded: %s', url)
-        return True
+        content_length = response.headers.get('Content-Length')
+        size_bytes = None
+        if content_length is not None:
+            try:
+                size_bytes = int(content_length)
+            except ValueError:
+                size_bytes = None
+        return (True, size_bytes)
     logger.info('URL test failed: %s', url)
-    return False
+    return (False, None)
 
 
-def add_link_if_new(link_raw: str) -> tuple[bool, str]:
+def add_link_if_new(link_raw: str) -> tuple[bool, str, Optional[int]]:
     url = (link_raw or '').strip()
     if not url:
-        return (False, '')
+        return (False, '', None)
 
     db = get_db()
     try:
@@ -462,14 +474,43 @@ def add_link_if_new(link_raw: str) -> tuple[bool, str]:
         )
         db.commit()
         added = cur.rowcount > 0
+        row_id = cur.lastrowid if added else None
         if added:
             logger.info('add_link_if_new() Link added: %s', url)
         else:
             logger.warning('add_link_if_new() Link already exists: %s', url)
-        return (added, url)
+        return (added, url, row_id)
     except sqlite3.Error:
         logger.error('add_link_if_new() Error adding link: %s', url)
-        return (False, url)
+        return (False, url, None)
+
+
+def set_file_size_by_id(row_id: int, size_bytes: int) -> bool:
+    db = get_db()
+    try:
+        cur = db.execute(
+            'UPDATE links SET size_bytes = ? WHERE id = ?',
+            (size_bytes, row_id),
+        )
+        db.commit()
+        updated = cur.rowcount > 0
+        logger.info(
+            'set_file_size_by_id() Updated row %d with size_bytes=%d: %s',
+            row_id, size_bytes, 'Success' if updated else 'Row not found',
+        )
+        return updated
+    except sqlite3.Error as e:
+        logger.error('set_file_size_by_id() Database error: %s', e)
+        return False
+
+
+def get_total_queue_size() -> int:
+    """Sum of size_bytes for all links currently in the queue."""
+    db = get_db()
+    row = db.execute("""
+        SELECT COALESCE(SUM(size_bytes), 0) AS total FROM links
+    """).fetchone()
+    return int(row['total']) if row else 0
 
 
 def _human_size(num_bytes: int) -> str:
@@ -618,20 +659,14 @@ def monitor_database_changes():
                     link.status = row['status']
                     link.pct_downloaded = row['pct_downloaded']
                     link.size_bytes = row['size_bytes']
-                    links.append(link_to_dict(link))
+                    links.append(link)
 
                 errors = [dict(row) for row in error_rows]
                 files = list_downloaded_files()
                 fs = get_fs_usage(DOWNLOADS_PATH)
 
-                socketio.emit(
-                    'full_update', {
-                        'links': links,
-                        'files': files,
-                        'fs': fs,
-                        'errors': errors,
-                    },
-                )
+                payload = build_full_update_payload(links, files, fs, errors)
+                socketio.emit('full_update', payload)
                 logger.info(
                     'monitor_database_changes() Emitted update: '
                     '%d links, %d files', len(links), len(files),
@@ -679,8 +714,11 @@ def index():
     if request.method == 'POST':
         url_input = request.form.get('link', '')
         val_message = validate_url(url_input)
+        url_ok, content_length = (
+            test_url(url_input) if val_message == 'ok' else (False, None)
+        )
 
-        if val_message == 'ok' and not test_url(url_input):
+        if val_message == 'ok' and not url_ok:
             message = 'Link nedostupný'
             logger.error('index() %s, input was: %s', message, url_input)
             flash(message, 'error')
@@ -690,11 +728,15 @@ def index():
             )
             flash(val_message, 'error')
         else:
-            added, value = add_link_if_new(url_input)
+            added, value, row_id = add_link_if_new(url_input)
             if added:
                 logger.info('index() Link added: %s', value)
                 flash(f"Přidáno: {value}", 'success')
-                socketio.emit('link_added', link_to_dict(Link(value)))
+                new_link = Link(value)
+                if row_id is not None and content_length is not None:
+                    set_file_size_by_id(row_id, content_length)
+                    new_link.size_bytes = content_length
+                socketio.emit('link_added', link_to_dict(new_link))
             else:
                 logger.info('index() Link already exists: %s', value)
                 flash(f"Již existuje: {value}", 'warning')
@@ -704,6 +746,7 @@ def index():
     files = list_downloaded_files()
     fs = get_fs_usage(DOWNLOADS_PATH)
     errors = read_download_errors()
+    total_queue_size = get_total_queue_size()
 
     settings = get_settings()
     if not check_token(settings['token']):
@@ -717,6 +760,8 @@ def index():
         fs=fs,
         settings=settings,
         errors=errors,
+        total_queue_size=total_queue_size,
+        total_queue_size_human=_human_size(total_queue_size),
     )
 
 
@@ -1112,14 +1157,7 @@ def handle_connect():
     files = list_downloaded_files()
     fs = get_fs_usage(DOWNLOADS_PATH)
     errors = read_download_errors()
-    emit(
-        'full_update', {
-            'links': [link_to_dict(link) for link in links],
-            'files': files,
-            'fs': fs,
-            'errors': errors,
-        },
-    )
+    emit('full_update', build_full_update_payload(links, files, fs, errors))
 
 
 @socketio.on('disconnect')
@@ -1134,14 +1172,7 @@ def handle_request_update():
     files = list_downloaded_files()
     fs = get_fs_usage(DOWNLOADS_PATH)
     errors = read_download_errors()
-    emit(
-        'full_update', {
-            'links': [link_to_dict(link) for link in links],
-            'files': files,
-            'fs': fs,
-            'errors': errors,
-        },
-    )
+    emit('full_update', build_full_update_payload(links, files, fs, errors))
 
 
 def link_to_dict(link: Link) -> dict:
@@ -1152,6 +1183,20 @@ def link_to_dict(link: Link) -> dict:
         'pct_downloaded': link.pct_downloaded,
         'size_bytes': link.size_bytes,
         'human_size': link.get_human_size(),
+    }
+
+
+def build_full_update_payload(
+    links: list[Link], files: list[dict], fs: dict, errors: list[dict],
+) -> dict:
+    total_queue_size = sum(link.size_bytes for link in links)
+    return {
+        'links': [link_to_dict(link) for link in links],
+        'files': files,
+        'fs': fs,
+        'errors': errors,
+        'total_queue_size': total_queue_size,
+        'total_queue_size_human': _human_size(total_queue_size),
     }
 
 

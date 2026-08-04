@@ -3,3 +3,8 @@
 
 # Pre-commit hook runner (linting/formatting managed by pre-commit in isolated envs)
 pre-commit
+
+# Testing
+pytest
+pytest-cov
+pytest-mock

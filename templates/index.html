@@ -273,6 +273,14 @@
                 </tr>
               {% endfor %}
             </tbody>
+            <tfoot>
+              <tr id="links-total-row">
+                <td class="fw-semibold text-end" colspan="2">Celkem:</td>
+                <td class="d-sm-table-cell fw-semibold" id="links-total-size">{{ total_queue_size_human }}</td>
+                <td class="d-sm-table-cell"></td>
+                <td></td>
+              </tr>
+            </tfoot>
           </table>
         </div>
       {% else %}
@@ -406,7 +414,7 @@
     // Track if user is currently renaming a file
     let isRenaming = false;
 
-    function renderLinks(links) {
+    function renderLinks(links, totalQueueSizeHuman) {
       const container = document.getElementById('links-container');
       if (!container) return;
 
@@ -434,6 +442,14 @@
               </tr>
             </thead>
             <tbody id="links-tbody"></tbody>
+            <tfoot>
+              <tr id="links-total-row">
+                <td class="fw-semibold text-end" colspan="2">Celkem:</td>
+                <td class="d-sm-table-cell fw-semibold" id="links-total-size"></td>
+                <td class="d-sm-table-cell"></td>
+                <td></td>
+              </tr>
+            </tfoot>
           </table>
         </div>
       `;
@@ -451,6 +467,9 @@
         `;
         tbody.appendChild(tr);
       });
+
+      const totalSizeCell = document.getElementById('links-total-size');
+      if (totalSizeCell) totalSizeCell.textContent = totalQueueSizeHuman || '0 B';
     }
 
     function renderFiles(files) {
@@ -610,7 +629,9 @@
     });
 
     socket.on('full_update', (payload) => {
-      if (payload.links !== undefined) renderLinks(payload.links);
+      if (payload.links !== undefined) {
+        renderLinks(payload.links, payload.total_queue_size_human);
+      }
       if (payload.files !== undefined) renderFiles(payload.files);
       if (payload.fs) updateFs(payload.fs);
       if (payload.errors !== undefined) renderErrors(payload.errors);

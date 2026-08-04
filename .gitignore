@@ -7,3 +7,6 @@ run.sh
 publish-image.sh
 .github/copilot-instructions.md
 dev_sync.sh
+.coverage
+.pytest_cache/
+htmlcov/

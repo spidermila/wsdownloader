@@ -1,0 +1,12 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=app --cov=downloader --cov-report=term-missing -v"
+
+[tool.coverage.run]
+source = ["app", "downloader"]
+omit = [
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+show_missing = true
