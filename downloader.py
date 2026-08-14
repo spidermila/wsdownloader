@@ -134,12 +134,12 @@ def set_speed_bps_by_id(row_id: int, speed_bps: int) -> bool:
             (int(speed_bps), row_id),
         )
         db.commit()
-        updated = cur.rowcount > 0
-        db.close()
-        return updated
+        return cur.rowcount > 0
     except sqlite3.Error as e:
         logger.error('set_speed_bps_by_id() Database error: %s', e)
         return False
+    finally:
+        db.close()
 
 
 def set_file_size_by_id(row_id: int, size_bytes: int) -> bool:
@@ -346,6 +346,8 @@ def download_file(url: str, row_id: int) -> None:
                 )
                 existing_bytes = 0
                 bytes_downloaded = 0
+                last_update_time = time()
+                last_bytes_at_update = 0
 
             if r.status_code == 206:
                 cr = r.headers.get('Content-Range')
@@ -697,24 +699,35 @@ def main_loop() -> None:
         sleep(10)
         return
 
-    content_length = response.headers.get('Content-Length')
+    content_length_raw = response.headers.get('Content-Length')
     content_type = response.headers.get('Content-Type', '')
+    media_type = content_type.split(';', 1)[0].strip().lower()
+    try:
+        size_bytes = (
+            int(content_length_raw) if content_length_raw is not None
+            else None
+        )
+    except ValueError:
+        size_bytes = None
+
     if (
         response.status_code == 200
-        and content_length is not None
-        and not content_type.startswith('text/html')
+        and size_bytes is not None
+        and size_bytes >= 0
+        and media_type != 'text/html'
     ):
         logger.info(
             'main_loop() Valid link found for row_id=%d, url=%s', row_id, url,
         )
-        set_file_size_by_id(row_id, int(content_length))
+        set_file_size_by_id(row_id, size_bytes)
         download_file(url, row_id)
     else:
         logger.warning(
             'main_loop() Invalid link or connection not working for '
             'row_id=%d, url=%s (status=%d, content_type=%s, '
             'content_length=%s)',
-            row_id, url, response.status_code, content_type, content_length,
+            row_id, url, response.status_code, content_type,
+            content_length_raw,
         )
         set_status_downloaded_by_id(row_id, 'connection_failed')
         sleep(10)
