@@ -115,6 +115,7 @@ class Link:
         self.status = 'new'
         self.pct_downloaded = 0
         self.size_bytes = 0
+        self.speed_bps = 0
 
     def get_file_name(self) -> str:
         try:
@@ -154,7 +155,8 @@ def init_db() -> None:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 status TEXT DEFAULT new,
                 pct_downloaded INTEGER DEFAULT 0,
-                size_bytes INTEGER DEFAULT 0
+                size_bytes INTEGER DEFAULT 0,
+                speed_bps INTEGER DEFAULT 0
             )
         """)
 
@@ -198,6 +200,11 @@ def init_db() -> None:
             conn.execute("""
                 ALTER TABLE links
                 ADD COLUMN size_bytes INTEGER DEFAULT 0
+            """)
+        if 'speed_bps' not in columns:
+            conn.execute("""
+                ALTER TABLE links
+                ADD COLUMN speed_bps INTEGER DEFAULT 0
             """)
 
         conn.commit()
@@ -366,7 +373,8 @@ def dequeue_file(token: str, file_id: str) -> str | None:
 def read_links_from_db() -> list[Link]:
     db = get_db()
     rows = db.execute("""
-        SELECT id, url, created_at, status, pct_downloaded, size_bytes
+        SELECT id, url, created_at, status, pct_downloaded, size_bytes,
+               speed_bps
         FROM links ORDER by created_at DESC
     """).fetchall()
     links: list[Link] = []
@@ -378,6 +386,7 @@ def read_links_from_db() -> list[Link]:
         _link.status = row['status']
         _link.pct_downloaded = row['pct_downloaded']
         _link.size_bytes = row['size_bytes']
+        _link.speed_bps = row['speed_bps'] or 0
         links.append(_link)
     return links
 
@@ -539,6 +548,15 @@ def _human_size(num_bytes: int) -> str:
     return '0 B'
 
 
+def _human_speed(bytes_per_sec: int) -> str:
+    if not bytes_per_sec or bytes_per_sec <= 0:
+        return ''
+    kbps = bytes_per_sec / 1024
+    if kbps < 1024:
+        return f"{kbps:.1f} KB/s"
+    return f"{kbps / 1024:.1f} MB/s"
+
+
 def get_fs_usage(base_path: Optional[Path] = None) -> dict:
     if base_path is None:
         base_path = DOWNLOADS_PATH
@@ -595,7 +613,7 @@ def get_db_state_hash() -> str:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         rows = conn.execute("""
-            SELECT url, status, pct_downloaded, size_bytes
+            SELECT url, status, pct_downloaded, size_bytes, speed_bps
             FROM links ORDER BY url
         """).fetchall()
 
@@ -610,7 +628,8 @@ def get_db_state_hash() -> str:
         for row in rows:
             state_part = (
                 f"{row['url']}:{row['status']}:"
-                f"{row['pct_downloaded']}:{row['size_bytes']}"
+                f"{row['pct_downloaded']}:{row['size_bytes']}:"
+                f"{row['speed_bps']}"
             )
             state_parts.append(state_part)
 
@@ -657,7 +676,8 @@ def monitor_database_changes():
                 conn = sqlite3.connect(DB_PATH)
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute("""
-                    SELECT url, status, pct_downloaded, size_bytes
+                    SELECT url, status, pct_downloaded, size_bytes,
+                           speed_bps
                     FROM links ORDER BY created_at DESC
                 """).fetchall()
 
@@ -675,6 +695,7 @@ def monitor_database_changes():
                     link.status = row['status']
                     link.pct_downloaded = row['pct_downloaded']
                     link.size_bytes = row['size_bytes']
+                    link.speed_bps = row['speed_bps'] or 0
                     links.append(link)
 
                 errors = [dict(row) for row in error_rows]
@@ -1199,6 +1220,8 @@ def link_to_dict(link: Link) -> dict:
         'pct_downloaded': link.pct_downloaded,
         'size_bytes': link.size_bytes,
         'human_size': link.get_human_size(),
+        'speed_bps': link.speed_bps,
+        'human_speed': _human_speed(link.speed_bps),
     }
 
 

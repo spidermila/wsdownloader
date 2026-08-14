@@ -88,7 +88,9 @@ def fetch_oldest() -> Optional[sqlite3.Row]:
     db = get_db()
     return db.execute("""
         SELECT id, url, created_at, status, pct_downloaded, size_bytes
-         FROM links ORDER BY created_at ASC LIMIT 1
+         FROM links
+         WHERE status NOT IN ('connection_failed', 'failed', 'space_waiting')
+         ORDER BY created_at ASC LIMIT 1
     """).fetchone()
 
 
@@ -121,6 +123,22 @@ def set_pct_downloaded_by_id(row_id: int, new_pct: int) -> bool:
         return updated
     except sqlite3.Error as e:
         logger.error('set_pct_downloaded_by_id() Database error: %s', e)
+        return False
+
+
+def set_speed_bps_by_id(row_id: int, speed_bps: int) -> bool:
+    db = get_db()
+    try:
+        cur = db.execute(
+            'UPDATE links SET speed_bps = ? WHERE id = ?',
+            (int(speed_bps), row_id),
+        )
+        db.commit()
+        updated = cur.rowcount > 0
+        db.close()
+        return updated
+    except sqlite3.Error as e:
+        logger.error('set_speed_bps_by_id() Database error: %s', e)
         return False
 
 
@@ -308,6 +326,7 @@ def download_file(url: str, row_id: int) -> None:
 
     bytes_downloaded = existing_bytes
     last_update_time = time()
+    last_bytes_at_update = bytes_downloaded
     update_interval = 2
 
     try:
@@ -351,7 +370,8 @@ def download_file(url: str, row_id: int) -> None:
                     bytes_downloaded += len(chunk)
 
                     current_time = time()
-                    if current_time - last_update_time >= update_interval:
+                    elapsed = current_time - last_update_time
+                    if elapsed >= update_interval:
                         if total_size:
                             pct = int(bytes_downloaded / total_size * 100)
                             pct = max(0, min(pct, 100))
@@ -359,13 +379,20 @@ def download_file(url: str, row_id: int) -> None:
                                 row_id=row_id,
                                 new_pct=pct,
                             )
+                        speed = int(
+                            (bytes_downloaded - last_bytes_at_update)
+                            / elapsed,
+                        )
+                        set_speed_bps_by_id(row_id, max(0, speed))
                         last_update_time = current_time
+                        last_bytes_at_update = bytes_downloaded
 
     except HTTPError:
         logger.error(
             'download_file() HTTP error while downloading %s to %s',
             url, temp_filepath,
         )
+        set_speed_bps_by_id(row_id, 0)
         set_status_downloaded_by_id(
             row_id=row_id,
             new_status='connection_failed',
@@ -376,6 +403,7 @@ def download_file(url: str, row_id: int) -> None:
             'download_file() Connection error while downloading %s to %s',
             url, temp_filepath,
         )
+        set_speed_bps_by_id(row_id, 0)
         set_status_downloaded_by_id(
             row_id=row_id,
             new_status='connection_failed',
@@ -386,8 +414,11 @@ def download_file(url: str, row_id: int) -> None:
             'download_file() File I/O error while writing %s: %s',
             temp_filepath, e,
         )
+        set_speed_bps_by_id(row_id, 0)
         set_status_downloaded_by_id(row_id=row_id, new_status='failed')
         return
+
+    set_speed_bps_by_id(row_id, 0)
 
     final_size = temp_filepath.stat().st_size
     if total_size is None:
@@ -655,19 +686,37 @@ def main_loop() -> None:
     row_id = row['id']
     url = row['url']
 
-    response = requests.head(url)
-    if response.status_code == 200:
+    try:
+        response = requests.head(url, allow_redirects=True, timeout=30)
+    except RequestException as e:
+        logger.warning(
+            'main_loop() HEAD request failed for row_id=%d, url=%s: %s',
+            row_id, url, e,
+        )
+        set_status_downloaded_by_id(row_id, 'connection_failed')
+        sleep(10)
+        return
+
+    content_length = response.headers.get('Content-Length')
+    content_type = response.headers.get('Content-Type', '')
+    if (
+        response.status_code == 200
+        and content_length is not None
+        and not content_type.startswith('text/html')
+    ):
         logger.info(
             'main_loop() Valid link found for row_id=%d, url=%s', row_id, url,
         )
-        file_size = int(response.headers['Content-Length'])
-        set_file_size_by_id(row_id, file_size)
+        set_file_size_by_id(row_id, int(content_length))
         download_file(url, row_id)
     else:
         logger.warning(
             'main_loop() Invalid link or connection not working for '
-            'row_id=%d, url=%s', row_id, url,
+            'row_id=%d, url=%s (status=%d, content_type=%s, '
+            'content_length=%s)',
+            row_id, url, response.status_code, content_type, content_length,
         )
+        set_status_downloaded_by_id(row_id, 'connection_failed')
         sleep(10)
 
 
