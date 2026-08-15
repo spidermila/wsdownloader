@@ -2,6 +2,14 @@
 
 Docker image changelog:
 
+## 0.6.0
+(released 15-Aug-2026)
+- Show current download speed (KB/s or MB/s, unit chosen automatically) next to the progress percentage while a file is downloading
+- Fixed queue getting permanently blocked when the oldest link had an expired or otherwise broken URL; the downloader now skips failed rows and moves on to the next valid link
+- Expired Webshare download links that redirect to an HTML error page are now correctly detected as invalid instead of being retried in a tight loop
+- More robust handling of unusual HTTP responses when validating a link (malformed `Content-Length`, unexpected content types, request timeouts)
+- CI/CD moved from a self-hosted runner to GitHub-hosted runners; no functional impact on the image
+
 ## 0.5.0
 (released 4-Aug-2026)
 - Show file sizes for files waiting in the download queue, plus a total queue size, so you know how much space to free up
