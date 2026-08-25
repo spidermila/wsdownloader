@@ -436,6 +436,100 @@ def test_stop_seeding_rejects_missing_url(client):
     assert resp.status_code == 302
 
 
+def test_torrent_details_rejects_missing_url(client):
+    resp = client.get('/torrent/details')
+    assert resp.status_code == 302
+
+
+def test_torrent_details_rejects_http(app_module, client):
+    with app_module.app.app_context():
+        app_module.add_link_if_new('https://example.com/a.mp4')
+    resp = client.get(
+        '/torrent/details?url=https://example.com/a.mp4',
+    )
+    assert resp.status_code == 302
+
+
+def test_torrent_details_renders_without_external_id(
+    app_module, client,
+):
+    from urllib.parse import quote
+    _enable_torrents(app_module)
+    _make_torrent_row(app_module, external_id=None)
+    resp = client.get(f'/torrent/details?url={quote(MAGNET)}')
+    assert resp.status_code == 200
+    assert b'Detail torrentu' in resp.data
+    assert b'nejsou dostupn' in resp.data
+
+
+def test_torrent_details_renders_full(app_module, client, monkeypatch):
+    _enable_torrents(app_module)
+    _make_torrent_row(app_module)
+
+    class Stub:
+        def tell_status(self, gid):
+            return {
+                'status': 'active', 'totalLength': '1000',
+                'completedLength': '500', 'downloadSpeed': '1024',
+                'uploadSpeed': '128', 'uploadLength': '256',
+                'connections': '3', 'seeder': 'false',
+                'infoHash': 'deadbeef', 'pieceLength': '16384',
+                'numPieces': '61',
+                'files': [{
+                    'path': '/downloads/movie.mp4',
+                    'length': '1000', 'completedLength': '500',
+                }],
+                'bittorrent': {
+                    'comment': 'Test', 'mode': 'single',
+                    'creationDate': 1700000000,
+                },
+            }
+
+        def get_peers(self, gid):
+            return [
+                {
+                    'ip': '1.2.3.4', 'port': '51413',
+                    'downloadSpeed': '512', 'uploadSpeed': '64',
+                    'seeder': 'true', 'amChoking': 'false',
+                    'peerChoking': 'true', 'bitfield': 'ffff',
+                },
+            ]
+
+        def get_servers(self, gid):
+            return []
+
+    from urllib.parse import quote
+    monkeypatch.setattr(
+        app_module.torrent, 'Aria2Client', lambda *a, **kw: Stub(),
+    )
+    resp = client.get(f'/torrent/details?url={quote(MAGNET)}')
+    assert resp.status_code == 200
+    body = resp.data.decode('utf-8')
+    assert 'Detail torrentu' in body
+    assert 'deadbeef' in body
+    assert '1.2.3.4' in body
+    assert 'movie.mp4' in body
+
+
+def test_torrent_details_handles_aria2_error(
+    app_module, client, monkeypatch,
+):
+    _enable_torrents(app_module)
+    _make_torrent_row(app_module)
+
+    class BadClient:
+        def tell_status(self, gid):
+            raise app_module.torrent.Aria2Error('rpc down')
+
+    from urllib.parse import quote
+    monkeypatch.setattr(
+        app_module.torrent, 'Aria2Client', lambda *a, **kw: BadClient(),
+    )
+    resp = client.get(f'/torrent/details?url={quote(MAGNET)}')
+    assert resp.status_code == 200
+    assert b'rpc down' in resp.data
+
+
 def test_torrents_enabled_helper_survives_db_error(app_module, monkeypatch):
     import sqlite3 as _sqlite3
 

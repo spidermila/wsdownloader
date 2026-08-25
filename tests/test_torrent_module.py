@@ -155,6 +155,56 @@ def test_tell_status_custom_keys(torrent_module, monkeypatch):
     assert seen['p'][2] == ['status']
 
 
+def test_get_peers_returns_list(torrent_module, monkeypatch):
+    monkeypatch.setattr(
+        torrent_module.requests, 'post',
+        lambda *a, **kw: _FakeResponse(
+            data={'result': [{'ip': '1.2.3.4'}]},
+        ),
+    )
+    peers = torrent_module.Aria2Client(secret='s').get_peers('g')
+    assert peers == [{'ip': '1.2.3.4'}]
+
+
+def test_get_peers_returns_empty_on_error(torrent_module, monkeypatch):
+    def boom(*a, **kw):
+        raise requests.RequestException('boom')
+
+    monkeypatch.setattr(torrent_module.requests, 'post', boom)
+    assert torrent_module.Aria2Client(secret='s').get_peers('g') == []
+
+
+def test_get_servers_returns_list(torrent_module, monkeypatch):
+    monkeypatch.setattr(
+        torrent_module.requests, 'post',
+        lambda *a, **kw: _FakeResponse(
+            data={'result': [{'index': '1', 'servers': []}]},
+        ),
+    )
+    servers = torrent_module.Aria2Client(secret='s').get_servers('g')
+    assert servers[0]['index'] == '1'
+
+
+def test_get_servers_returns_empty_on_error(torrent_module, monkeypatch):
+    monkeypatch.setattr(
+        torrent_module.requests, 'post',
+        lambda *a, **kw: (_ for _ in ()).throw(
+            requests.RequestException('down'),
+        ),
+    )
+    assert torrent_module.Aria2Client(secret='s').get_servers('g') == []
+
+
+def test_get_peers_returns_empty_when_result_is_none(
+    torrent_module, monkeypatch,
+):
+    monkeypatch.setattr(
+        torrent_module.requests, 'post',
+        lambda *a, **kw: _FakeResponse(data={'result': None}),
+    )
+    assert torrent_module.Aria2Client(secret='s').get_peers('g') == []
+
+
 def test_remove_and_change_option(torrent_module, monkeypatch):
     seen = []
 

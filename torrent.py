@@ -132,6 +132,18 @@ class Aria2Client:
     def unpause(self, gid: str) -> str:
         return self._call('aria2.unpause', gid)
 
+    def get_peers(self, gid: str) -> list:
+        try:
+            return self._call('aria2.getPeers', gid) or []
+        except Aria2Error:
+            return []
+
+    def get_servers(self, gid: str) -> list:
+        try:
+            return self._call('aria2.getServers', gid) or []
+        except Aria2Error:
+            return []
+
     def change_option(self, gid: str, options: dict) -> str:
         return self._call('aria2.changeOption', gid, options)
 
