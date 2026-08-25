@@ -89,26 +89,33 @@ def get_db() -> sqlite3.Connection:
 
 def fetch_oldest() -> Optional[sqlite3.Row]:
     db = get_db()
-    return db.execute("""
-        SELECT id, url, created_at, status, pct_downloaded, size_bytes,
-               kind, external_id
-         FROM links
-         WHERE status NOT IN ('connection_failed', 'failed', 'space_waiting')
-           AND (kind IS NULL OR kind = 'http')
-         ORDER BY created_at ASC LIMIT 1
-    """).fetchone()
+    try:
+        return db.execute("""
+            SELECT id, url, created_at, status, pct_downloaded,
+                   size_bytes, kind, external_id
+             FROM links
+             WHERE status NOT IN
+                   ('connection_failed', 'failed', 'space_waiting')
+               AND (kind IS NULL OR kind = 'http')
+             ORDER BY created_at ASC LIMIT 1
+        """).fetchone()
+    finally:
+        db.close()
 
 
 def fetch_active_torrents() -> list[sqlite3.Row]:
     db = get_db()
-    return db.execute("""
-        SELECT id, url, status, pct_downloaded, size_bytes, speed_bps,
-               kind, external_id
-         FROM links
-         WHERE kind IN ('magnet', 'torrent')
-           AND status NOT IN ('failed', 'space_waiting')
-         ORDER BY created_at ASC
-    """).fetchall()
+    try:
+        return db.execute("""
+            SELECT id, url, status, pct_downloaded, size_bytes, speed_bps,
+                   kind, external_id
+             FROM links
+             WHERE kind IN ('magnet', 'torrent')
+               AND status NOT IN ('failed', 'space_waiting')
+             ORDER BY created_at ASC
+        """).fetchall()
+    finally:
+        db.close()
 
 
 def delete_by_id(row_id: int) -> int:
@@ -225,11 +232,14 @@ def set_status_downloaded_by_id(row_id: int, new_status: str) -> bool:
 
 def get_settings() -> dict:
     db = get_db()
-    row = db.execute("""
-        SELECT id, token, auto_download, user_name, password_hash,
-               torrent_enabled, torrent_seed_mode, torrent_seed_value
-        FROM settings WHERE id = 1
-    """).fetchone()
+    try:
+        row = db.execute("""
+            SELECT id, token, auto_download, user_name, password_hash,
+                   torrent_enabled, torrent_seed_mode, torrent_seed_value
+            FROM settings WHERE id = 1
+        """).fetchone()
+    finally:
+        db.close()
     if not row:
         return {
             'id': 1,
@@ -651,6 +661,8 @@ def add_link_if_new(link_raw: str) -> tuple[bool, str, Optional[int]]:
             'add_link_if_new() Database error while adding link: %s', url,
         )
         return (False, url, None)
+    finally:
+        db.close()
 
 
 def log_download_error(

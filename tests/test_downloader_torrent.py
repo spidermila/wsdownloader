@@ -532,6 +532,29 @@ def test_apply_status_complete_ignores_remove_failure(
     assert row is None
 
 
+def test_new_fetches_close_their_connections(downloader_module, monkeypatch):
+    """Regression: fetch_oldest, fetch_active_torrents, get_settings,
+    add_link_if_new must not leak sqlite3 connections."""
+    opened = []
+    real_get_db = downloader_module.get_db
+
+    def tracking_get_db():
+        conn = real_get_db()
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(downloader_module, 'get_db', tracking_get_db)
+
+    downloader_module.fetch_oldest()
+    downloader_module.fetch_active_torrents()
+    downloader_module.get_settings()
+    downloader_module.add_link_if_new('https://example.com/x.mp4')
+
+    for conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute('SELECT 1')
+
+
 def test_try_remove_result_noop_on_empty_gid(downloader_module):
     class Client:
         def remove_download_result(self, gid):
