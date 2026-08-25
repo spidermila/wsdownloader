@@ -6,3 +6,6 @@ passlib
 gevent
 gevent-websocket
 requests
+# Transitive dep of gunicorn's ggevent worker (import fails without it,
+# and gunicorn does not declare it as a hard requirement).
+packaging
