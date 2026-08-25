@@ -219,7 +219,7 @@ def test_seed_options_ignored_when_value_zero(torrent_module):
 def test_map_status_transitions(torrent_module):
     assert torrent_module.map_status('active', False) == 'downloading'
     assert torrent_module.map_status('waiting', False) == 'new'
-    assert torrent_module.map_status('paused', False) == 'new'
+    assert torrent_module.map_status('paused', False) == 'paused'
     assert torrent_module.map_status('complete', False) == 'downloaded'
     assert torrent_module.map_status('complete', True) == 'seeding'
     assert torrent_module.map_status('error', False) == 'failed'

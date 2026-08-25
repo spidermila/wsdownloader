@@ -118,6 +118,9 @@ class Link:
         self.pct_downloaded = 0
         self.size_bytes = 0
         self.speed_bps = 0
+        self.connections = 0
+        self.upload_speed_bps = 0
+        self.uploaded_bytes = 0
         self.kind = torrent.KIND_HTTP
         self.external_id: Optional[str] = None
 
@@ -172,7 +175,10 @@ def init_db() -> None:
                 size_bytes INTEGER DEFAULT 0,
                 speed_bps INTEGER DEFAULT 0,
                 kind TEXT NOT NULL DEFAULT 'http',
-                external_id TEXT
+                external_id TEXT,
+                connections INTEGER NOT NULL DEFAULT 0,
+                upload_speed_bps INTEGER NOT NULL DEFAULT 0,
+                uploaded_bytes INTEGER NOT NULL DEFAULT 0
             )
         """)
 
@@ -245,6 +251,21 @@ def init_db() -> None:
             )
         if 'external_id' not in columns:
             conn.execute('ALTER TABLE links ADD COLUMN external_id TEXT')
+        if 'connections' not in columns:
+            conn.execute(
+                'ALTER TABLE links ADD COLUMN connections INTEGER '
+                'NOT NULL DEFAULT 0',
+            )
+        if 'upload_speed_bps' not in columns:
+            conn.execute(
+                'ALTER TABLE links ADD COLUMN upload_speed_bps INTEGER '
+                'NOT NULL DEFAULT 0',
+            )
+        if 'uploaded_bytes' not in columns:
+            conn.execute(
+                'ALTER TABLE links ADD COLUMN uploaded_bytes INTEGER '
+                'NOT NULL DEFAULT 0',
+            )
 
         conn.commit()
     finally:
@@ -419,10 +440,17 @@ def _row_to_link(row) -> Link:
     link.pct_downloaded = row['pct_downloaded']
     link.size_bytes = row['size_bytes']
     link.speed_bps = row['speed_bps'] or 0
-    if 'kind' in row.keys():
+    keys = row.keys()
+    if 'kind' in keys:
         link.kind = row['kind'] or torrent.KIND_HTTP
-    if 'external_id' in row.keys():
+    if 'external_id' in keys:
         link.external_id = row['external_id']
+    if 'connections' in keys:
+        link.connections = row['connections'] or 0
+    if 'upload_speed_bps' in keys:
+        link.upload_speed_bps = row['upload_speed_bps'] or 0
+    if 'uploaded_bytes' in keys:
+        link.uploaded_bytes = row['uploaded_bytes'] or 0
     return link
 
 
@@ -430,7 +458,8 @@ def read_links_from_db() -> list[Link]:
     db = get_db()
     rows = db.execute("""
         SELECT id, url, created_at, status, pct_downloaded, size_bytes,
-               speed_bps, kind, external_id
+               speed_bps, kind, external_id, connections,
+               upload_speed_bps, uploaded_bytes
         FROM links ORDER by created_at DESC
     """).fetchall()
     if len(rows) == 0:
@@ -772,7 +801,8 @@ def monitor_database_changes():
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute("""
                     SELECT url, status, pct_downloaded, size_bytes,
-                           speed_bps, kind, external_id
+                           speed_bps, kind, external_id, connections,
+                           upload_speed_bps, uploaded_bytes
                     FROM links ORDER BY created_at DESC
                 """).fetchall()
 
@@ -982,6 +1012,21 @@ def _remove_from_aria2(external_id: str) -> None:
         )
 
 
+def _torrent_row_by_url(url: str):
+    return get_db().execute(
+        'SELECT id, kind, external_id, status FROM links WHERE url = ?',
+        (url,),
+    ).fetchone()
+
+
+def _set_row_status(row_id: int, status: str) -> None:
+    db = get_db()
+    db.execute(
+        'UPDATE links SET status = ? WHERE id = ?', (status, row_id),
+    )
+    db.commit()
+
+
 @app.route('/delete', methods=['POST'])
 def delete_link():
     url_to_delete = (request.form.get('url') or '').strip()
@@ -1162,6 +1207,60 @@ def update_auto_download():
         f'Automatické stahování {"zapnuto" if enabled else "vypnuto"}.',
         'success',
     )
+    return redirect(url_for('index'))
+
+
+@app.post('/torrent/pause')
+def pause_torrent():
+    url = (request.form.get('url') or '').strip()
+    row = _torrent_row_by_url(url) if url else None
+    if row is None or row['kind'] == torrent.KIND_HTTP or \
+            not row['external_id']:
+        flash('Není to torrent nebo ještě nezapočal.', 'error')
+        return redirect(url_for('index'))
+    try:
+        torrent.Aria2Client().pause(row['external_id'])
+    except torrent.Aria2Error as exc:
+        logger.warning('pause_torrent() Aria2 error: %s', exc)
+        flash('Nepodařilo se pozastavit torrent.', 'error')
+        return redirect(url_for('index'))
+    _set_row_status(row['id'], 'paused')
+    flash('Torrent pozastaven.', 'success')
+    return redirect(url_for('index'))
+
+
+@app.post('/torrent/resume')
+def resume_torrent():
+    url = (request.form.get('url') or '').strip()
+    row = _torrent_row_by_url(url) if url else None
+    if row is None or row['kind'] == torrent.KIND_HTTP or \
+            not row['external_id']:
+        flash('Není to torrent.', 'error')
+        return redirect(url_for('index'))
+    try:
+        torrent.Aria2Client().unpause(row['external_id'])
+    except torrent.Aria2Error as exc:
+        logger.warning('resume_torrent() Aria2 error: %s', exc)
+        flash('Nepodařilo se obnovit torrent.', 'error')
+        return redirect(url_for('index'))
+    _set_row_status(row['id'], 'downloading')
+    flash('Torrent obnoven.', 'success')
+    return redirect(url_for('index'))
+
+
+@app.post('/torrent/stop-seeding')
+def stop_seeding_torrent():
+    url = (request.form.get('url') or '').strip()
+    row = _torrent_row_by_url(url) if url else None
+    if row is None or row['kind'] == torrent.KIND_HTTP:
+        flash('Není to torrent.', 'error')
+        return redirect(url_for('index'))
+    _remove_from_aria2(row['external_id'] or '')
+    db = get_db()
+    db.execute('DELETE FROM links WHERE id = ?', (row['id'],))
+    db.commit()
+    socketio.emit('link_deleted', {'url': url})
+    flash('Sdílení torrentu ukončeno. Soubory zůstávají.', 'success')
     return redirect(url_for('index'))
 
 
@@ -1374,6 +1473,10 @@ def handle_request_update():
 
 
 def link_to_dict(link: Link) -> dict:
+    ratio = (
+        link.uploaded_bytes / link.size_bytes
+        if link.size_bytes else 0.0
+    )
     return {
         'url': link.url,
         'file_name': link.get_file_name(),
@@ -1384,6 +1487,11 @@ def link_to_dict(link: Link) -> dict:
         'speed_bps': link.speed_bps,
         'human_speed': _human_speed(link.speed_bps),
         'kind': link.kind,
+        'connections': link.connections,
+        'upload_speed_bps': link.upload_speed_bps,
+        'human_upload_speed': _human_speed(link.upload_speed_bps),
+        'uploaded_bytes': link.uploaded_bytes,
+        'ratio': round(ratio, 2),
     }
 
 
