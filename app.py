@@ -643,6 +643,7 @@ def get_total_queue_size() -> int:
     return int(row['total']) if row else 0
 
 
+@app.template_filter('human_size')
 def _human_size(num_bytes: int) -> str:
     units = ['B', 'KB', 'MB', 'GB', 'TB']
     size = float(num_bytes)
@@ -653,6 +654,7 @@ def _human_size(num_bytes: int) -> str:
     return '0 B'
 
 
+@app.template_filter('human_speed')
 def _human_speed(bytes_per_sec: int) -> str:
     if not bytes_per_sec or bytes_per_sec <= 0:
         return ''
@@ -1208,6 +1210,43 @@ def update_auto_download():
         'success',
     )
     return redirect(url_for('index'))
+
+
+@app.get('/torrent/details')
+def torrent_details():
+    url = (request.args.get('url') or '').strip()
+    if not url:
+        flash('Chybí URL.', 'error')
+        return redirect(url_for('index'))
+    db_row = get_db().execute(
+        'SELECT url, status, pct_downloaded, size_bytes, speed_bps, '
+        'connections, upload_speed_bps, uploaded_bytes, kind, external_id '
+        'FROM links WHERE url = ?', (url,),
+    ).fetchone()
+    if db_row is None or db_row['kind'] == torrent.KIND_HTTP:
+        flash('Není to torrent.', 'error')
+        return redirect(url_for('index'))
+
+    link = _row_to_link(db_row)
+    detail: dict = {'aria2_available': False}
+    if db_row['external_id']:
+        try:
+            client = torrent.Aria2Client()
+            detail = {
+                'aria2_available': True,
+                'status': client.tell_status(db_row['external_id']),
+                'peers': client.get_peers(db_row['external_id']),
+                'servers': client.get_servers(db_row['external_id']),
+            }
+        except torrent.Aria2Error as exc:
+            detail = {'aria2_available': False, 'error': str(exc)}
+
+    return render_template(
+        'torrent_details.html',
+        settings=get_settings(),
+        link=link,
+        detail=detail,
+    )
 
 
 @app.post('/torrent/pause')

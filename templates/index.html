@@ -316,19 +316,24 @@
                     {% endif %}
                   </td>
                   <td class="d-sm-table-cell">{{ l.get_human_size() }}</td>
+                  {%- macro fmt_speed(bps) -%}
+                    {%- if bps and bps > 0 -%}
+                      {%- if (bps / 1024) < 1024 -%}
+                        {{ '%.1f'|format(bps / 1024) }} KB/s
+                      {%- else -%}
+                        {{ '%.1f'|format(bps / 1048576) }} MB/s
+                      {%- endif -%}
+                    {%- else -%}0 KB/s{%- endif -%}
+                  {%- endmacro -%}
                   <td class="d-sm-table-cell">
                     {% if l.status == "downloading" %}
-                      {{ l.pct_downloaded }}% Staženo{% if l.speed_bps and l.speed_bps > 0 %}
-                        &middot;
-                        {% if (l.speed_bps / 1024) < 1024 %}
-                          {{ '%.1f'|format(l.speed_bps / 1024) }} KB/s
-                        {% else %}
-                          {{ '%.1f'|format(l.speed_bps / 1048576) }} MB/s
-                        {% endif %}
+                      {{ l.pct_downloaded }}% ↓ {{ fmt_speed(l.speed_bps) }}
+                      {% if l.kind != 'http' %}
+                        &middot; ↑ {{ fmt_speed(l.upload_speed_bps) }}
+                        &middot; ({{ l.connections }} spojení)
                       {% endif %}
-                      {% if l.kind != 'http' %} ({{ l.connections }} spojení){% endif %}
                     {% elif l.status == "seeding" %}
-                      ↑ {% if l.upload_speed_bps and l.upload_speed_bps > 0 %}{% if (l.upload_speed_bps / 1024) < 1024 %}{{ '%.1f'|format(l.upload_speed_bps / 1024) }} KB/s{% else %}{{ '%.1f'|format(l.upload_speed_bps / 1048576) }} MB/s{% endif %}{% else %}0 KB/s{% endif %}
+                      ↑ {{ fmt_speed(l.upload_speed_bps) }}
                       &middot; poměr {{ '%.2f'|format(l.ratio if l.ratio is defined else 0) }}
                       &middot; ({{ l.connections }} spojení)
                     {% elif l.status == "paused" %}
@@ -338,6 +343,9 @@
                     {% endif %}
                   </td>
                   <td class="text-nowrap">
+                    {% if l.kind != 'http' %}
+                      <a href="{{ url_for('torrent_details', url=l.url) }}" class="btn btn-sm btn-outline-info" title="Detail">ℹ</a>
+                    {% endif %}
                     {% if l.kind != 'http' and l.status == 'downloading' %}
                       <form method="post" action="{{ url_for('pause_torrent') }}" class="d-inline">
                         <input type="hidden" name="url" value="{{ l.url }}">
@@ -668,42 +676,47 @@
       }
       if (l.status === 'paused') return 'Pozastaveno';
       if (l.status !== 'downloading') return '&mdash;';
-      const speed = formatSpeed(l.speed_bps);
-      const conn = (l.kind && l.kind !== 'http') ? ` (${l.connections || 0} spojení)` : '';
-      const head = speed ? `${l.pct_downloaded}% Staženo · ${speed}` : `${l.pct_downloaded}% Staženo`;
-      return head + conn;
+      const down = formatSpeed(l.speed_bps) || '0 KB/s';
+      if (l.kind && l.kind !== 'http') {
+        const up = formatSpeed(l.upload_speed_bps) || '0 KB/s';
+        return `${l.pct_downloaded}% ↓ ${down} · ↑ ${up} · (${l.connections || 0} spojení)`;
+      }
+      return `${l.pct_downloaded}% ↓ ${down}`;
     }
 
     function renderActions(l) {
       const isTorrent = l.kind && l.kind !== 'http';
+      const info = isTorrent
+        ? `<a href="/torrent/details?url=${encodeURIComponent(l.url)}" class="btn btn-sm btn-outline-info" title="Detail">ℹ</a>`
+        : '';
       const del = `
         <form method="post" action="{{ url_for('delete_link') }}" class="d-inline">
           <input type="hidden" name="url" value="${l.url}">
           <button type="submit" class="btn btn-sm btn-danger" title="Zrušit a smazat">✕</button>
         </form>`;
       if (isTorrent && l.status === 'downloading') {
-        return `
+        return `${info}
           <form method="post" action="{{ url_for('pause_torrent') }}" class="d-inline">
             <input type="hidden" name="url" value="${l.url}">
             <button type="submit" class="btn btn-sm btn-outline-secondary" title="Pozastavit">⏸</button>
           </form>${del}`;
       }
       if (isTorrent && l.status === 'paused') {
-        return `
+        return `${info}
           <form method="post" action="{{ url_for('resume_torrent') }}" class="d-inline">
             <input type="hidden" name="url" value="${l.url}">
             <button type="submit" class="btn btn-sm btn-outline-primary" title="Obnovit">▶</button>
           </form>${del}`;
       }
       if (l.status === 'seeding') {
-        return `
+        return `${info}
           <form method="post" action="{{ url_for('stop_seeding_torrent') }}" class="d-inline">
             <input type="hidden" name="url" value="${l.url}">
             <button type="submit" class="btn btn-sm btn-outline-warning" title="Ukončit sdílení">⏹ Ukončit sdílení</button>
           </form>`;
       }
-      if (l.status === 'downloading') return '<span class="text-muted">—</span>';
-      const delFallback = `
+      if (l.status === 'downloading') return info || '<span class="text-muted">—</span>';
+      const delFallback = `${info}
         <form method="post" action="{{ url_for('delete_link') }}" class="d-inline">
           <input type="hidden" name="url" value="${l.url}">
           <button type="submit" class="btn btn-sm btn-danger" aria-label="Odstranit ${l.url}">Smazat</button>
