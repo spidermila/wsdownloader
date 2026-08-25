@@ -253,8 +253,10 @@ def test_link_to_dict_includes_kind(app_module):
 
 
 def test_torrents_enabled_helper_survives_db_error(app_module, monkeypatch):
+    import sqlite3 as _sqlite3
+
     def boom():
-        raise RuntimeError('db is unhappy')
+        raise _sqlite3.OperationalError('database is locked')
 
     monkeypatch.setattr(app_module, 'get_settings', boom)
     assert app_module._torrents_enabled() is False
