@@ -18,6 +18,9 @@ export ARIA2_RPC_SECRET
 : "${ARIA2_LISTEN_PORT:=51413}"
 : "${ARIA2_ENABLE_DHT:=true}"
 
+# aria2 refuses to start if --input-file points at a missing path.
+touch "${DATA_DIR:-/data}/aria2.session"
+
 # Launch aria2 in RPC mode.  Bound to 127.0.0.1 with a shared secret; the
 # BT peer port (51413) is only exposed if the operator publishes it via -p.
 aria2c \
@@ -76,6 +79,7 @@ trap term_handler SIGTERM SIGINT
 # tolerates a brief RPC outage).
 restart_aria2() {
   echo "aria2 stopped; restarting..."
+  touch "${DATA_DIR:-/data}/aria2.session"
   aria2c \
     --enable-rpc=true --rpc-listen-all=false --rpc-listen-port=6800 \
     --rpc-secret="${ARIA2_RPC_SECRET}" \
