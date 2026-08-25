@@ -26,7 +26,7 @@ KIND_TORRENT = 'torrent'
 STATUS_MAP = {
     'active': 'downloading',
     'waiting': 'new',
-    'paused': 'new',
+    'paused': 'paused',
     'complete': 'downloaded',
     'error': 'failed',
     'removed': 'failed',
@@ -115,8 +115,8 @@ class Aria2Client:
         if keys is None:
             keys = [
                 'status', 'totalLength', 'completedLength', 'downloadSpeed',
-                'uploadSpeed', 'files', 'bittorrent', 'errorCode',
-                'errorMessage', 'seeder',
+                'uploadSpeed', 'uploadLength', 'connections', 'files',
+                'bittorrent', 'errorCode', 'errorMessage', 'seeder',
             ]
         return self._call('aria2.tellStatus', gid, keys)
 
@@ -125,6 +125,12 @@ class Aria2Client:
 
     def remove_download_result(self, gid: str) -> str:
         return self._call('aria2.removeDownloadResult', gid)
+
+    def pause(self, gid: str) -> str:
+        return self._call('aria2.pause', gid)
+
+    def unpause(self, gid: str) -> str:
+        return self._call('aria2.unpause', gid)
 
     def change_option(self, gid: str, options: dict) -> str:
         return self._call('aria2.changeOption', gid, options)

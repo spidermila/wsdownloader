@@ -128,32 +128,60 @@
         </div>
       {% endif %}
       <div id="torrent-settings" class="collapse mt-2">
-        <form method="post" action="{{ url_for('update_torrent_settings') }}" class="row g-2 align-items-center border rounded p-2">
-          <div class="col-auto form-check form-switch m-0">
-            <input class="form-check-input" type="checkbox" role="switch"
-              id="torrent_enabled" name="torrent_enabled"
-              {% if settings and settings.torrent_enabled %}checked{% endif %}>
-            <label class="form-check-label small" for="torrent_enabled">Povolit torrenty</label>
+        <form method="post" action="{{ url_for('update_torrent_settings') }}" class="border rounded p-2">
+          <div class="row g-2 align-items-end">
+            <div class="col-auto">
+              <div class="form-check form-switch m-0 pb-1">
+                <input class="form-check-input" type="checkbox" role="switch"
+                  id="torrent_enabled" name="torrent_enabled"
+                  {% if settings and settings.torrent_enabled %}checked{% endif %}>
+                <label class="form-check-label small" for="torrent_enabled">Povolit torrenty</label>
+              </div>
+            </div>
+            <div class="col-auto">
+              <label class="form-label small mb-1" for="torrent_seed_mode">Sdílení po stažení</label>
+              <select id="torrent_seed_mode" name="torrent_seed_mode" class="form-select form-select-sm">
+                <option value="off" {% if not settings or settings.torrent_seed_mode == 'off' %}selected{% endif %}>Vypnuto</option>
+                <option value="ratio" {% if settings and settings.torrent_seed_mode == 'ratio' %}selected{% endif %}>Do poměru</option>
+                <option value="time" {% if settings and settings.torrent_seed_mode == 'time' %}selected{% endif %}>Po dobu</option>
+              </select>
+            </div>
+            <div class="col-auto">
+              <label class="form-label small mb-1" for="torrent_seed_value">
+                <span data-seed-mode-label data-for="off" {% if settings and settings.torrent_seed_mode != 'off' %}hidden{% endif %}>(nepoužívá se)</span>
+                <span data-seed-mode-label data-for="ratio" {% if not settings or settings.torrent_seed_mode != 'ratio' %}hidden{% endif %}>Poměr (např. 1.0)</span>
+                <span data-seed-mode-label data-for="time" {% if not settings or settings.torrent_seed_mode != 'time' %}hidden{% endif %}>Doba (minuty)</span>
+              </label>
+              <input id="torrent_seed_value" type="number" name="torrent_seed_value" step="0.1" min="0"
+                class="form-control form-control-sm"
+                value="{{ (settings.torrent_seed_value if settings else 0) or 0 }}"
+                {% if not settings or settings.torrent_seed_mode == 'off' %}disabled{% endif %}>
+            </div>
+            <div class="col-auto">
+              <button type="submit" class="btn btn-sm btn-primary">Uložit</button>
+            </div>
           </div>
-          <div class="col-auto">
-            <label class="small" for="torrent_seed_mode">Sdílení:</label>
-            <select id="torrent_seed_mode" name="torrent_seed_mode" class="form-select form-select-sm">
-              <option value="off" {% if not settings or settings.torrent_seed_mode == 'off' %}selected{% endif %}>Vypnuto</option>
-              <option value="ratio" {% if settings and settings.torrent_seed_mode == 'ratio' %}selected{% endif %}>Do poměru</option>
-              <option value="time" {% if settings and settings.torrent_seed_mode == 'time' %}selected{% endif %}>Po dobu (min)</option>
-            </select>
-          </div>
-          <div class="col-auto">
-            <input type="number" name="torrent_seed_value" step="0.1" min="0" class="form-control form-control-sm"
-              value="{{ (settings.torrent_seed_value if settings else 0) or 0 }}" aria-label="Hodnota sdílení">
-          </div>
-          <div class="col-auto">
-            <button type="submit" class="btn btn-sm btn-primary">Uložit</button>
-          </div>
-          <div class="col-12 form-text">
+          <div class="form-text mt-2">
             Za obsah stažených torrentů zodpovídá uživatel.
+            Sdílí se pouze soubory stažené z torrentů, dokud není dosaženo cíle. Ostatní stažené soubory (HTTP, Webshare) se nesdílí nikdy.
           </div>
         </form>
+        <script>
+          (function () {
+            const modeSel = document.getElementById('torrent_seed_mode');
+            const valueInp = document.getElementById('torrent_seed_value');
+            const labels = document.querySelectorAll('[data-seed-mode-label]');
+            function sync() {
+              const mode = modeSel.value;
+              labels.forEach(el => {
+                el.hidden = el.dataset.for !== mode;
+              });
+              valueInp.disabled = mode === 'off';
+            }
+            modeSel.addEventListener('change', sync);
+            sync();
+          })();
+        </script>
       </div>
       </div>
     </div>
@@ -298,20 +326,50 @@
                           {{ '%.1f'|format(l.speed_bps / 1048576) }} MB/s
                         {% endif %}
                       {% endif %}
+                      {% if l.kind != 'http' %} ({{ l.connections }} spojení){% endif %}
+                    {% elif l.status == "seeding" %}
+                      ↑ {% if l.upload_speed_bps and l.upload_speed_bps > 0 %}{% if (l.upload_speed_bps / 1024) < 1024 %}{{ '%.1f'|format(l.upload_speed_bps / 1024) }} KB/s{% else %}{{ '%.1f'|format(l.upload_speed_bps / 1048576) }} MB/s{% endif %}{% else %}0 KB/s{% endif %}
+                      &middot; poměr {{ '%.2f'|format(l.ratio if l.ratio is defined else 0) }}
+                      &middot; ({{ l.connections }} spojení)
+                    {% elif l.status == "paused" %}
+                      Pozastaveno
                     {% else %}
                       &mdash;
                     {% endif %}
                   </td>
-                  <td>
-                    {% if l.status != "downloading" %}
+                  <td class="text-nowrap">
+                    {% if l.kind != 'http' and l.status == 'downloading' %}
+                      <form method="post" action="{{ url_for('pause_torrent') }}" class="d-inline">
+                        <input type="hidden" name="url" value="{{ l.url }}">
+                        <button type="submit" class="btn btn-sm btn-outline-secondary" title="Pozastavit">⏸</button>
+                      </form>
+                      <form method="post" action="{{ url_for('delete_link') }}" class="d-inline">
+                        <input type="hidden" name="url" value="{{ l.url }}">
+                        <button type="submit" class="btn btn-sm btn-danger" title="Zrušit a smazat">✕</button>
+                      </form>
+                    {% elif l.kind != 'http' and l.status == 'paused' %}
+                      <form method="post" action="{{ url_for('resume_torrent') }}" class="d-inline">
+                        <input type="hidden" name="url" value="{{ l.url }}">
+                        <button type="submit" class="btn btn-sm btn-outline-primary" title="Obnovit">▶</button>
+                      </form>
+                      <form method="post" action="{{ url_for('delete_link') }}" class="d-inline">
+                        <input type="hidden" name="url" value="{{ l.url }}">
+                        <button type="submit" class="btn btn-sm btn-danger" title="Zrušit a smazat">✕</button>
+                      </form>
+                    {% elif l.status == "seeding" %}
+                      <form method="post" action="{{ url_for('stop_seeding_torrent') }}" class="d-inline">
+                        <input type="hidden" name="url" value="{{ l.url }}">
+                        <button type="submit" class="btn btn-sm btn-outline-warning" title="Ukončit sdílení">⏹ Ukončit sdílení</button>
+                      </form>
+                    {% elif l.status == "downloading" %}
+                      <span class="text-muted">—</span>
+                    {% else %}
                       <form method="post" action="{{ url_for('delete_link') }}" class="d-inline">
                         <input type="hidden" name="url" value="{{ l.url }}">
                         <button type="submit" class="btn btn-sm btn-danger" aria-label="Odstranit {{ l.url }}">
                           Smazat
                         </button>
                       </form>
-                    {% else %}
-                      <span class="text-muted">—</span>
                     {% endif %}
                   </td>
                 </tr>
@@ -503,7 +561,7 @@
         const tr = document.createElement('tr');
         tr.dataset.url = l.url;
         tr.innerHTML = `
-          <td class="fw-semibold text-break col-filename">${l.file_name}</td>
+          <td class="fw-semibold text-break col-filename">${renderKindBadge(l.kind)}${l.file_name}</td>
           <td class="d-sm-table-cell status-cell">${renderStatus(l.status)}</td>
           <td class="d-sm-table-cell size-cell">${l.human_size}</td>
           <td class="d-sm-table-cell progress-cell">${renderProgress(l)}</td>
@@ -583,8 +641,16 @@
     function renderStatus(status) {
       if (status === 'new') return 'čeká na stažení';
       if (status === 'downloading') return 'stahování';
+      if (status === 'seeding') return 'sdílení';
+      if (status === 'paused') return 'pozastaveno';
       if (status === 'space_waiting') return 'Nedostatek místa na disku. Smaž nějaké stažené soubory.';
       return '&mdash;';
+    }
+
+    function renderKindBadge(kind) {
+      if (kind === 'magnet') return '<span class="badge bg-secondary me-1" title="magnet">🧲</span> ';
+      if (kind === 'torrent') return '<span class="badge bg-secondary me-1" title="torrent">📦</span> ';
+      return '';
     }
 
     function formatSpeed(bps) {
@@ -595,21 +661,54 @@
     }
 
     function renderProgress(l) {
+      if (l.status === 'seeding') {
+        const up = formatSpeed(l.upload_speed_bps) || '0 KB/s';
+        const ratio = (l.ratio != null ? l.ratio : 0).toFixed(2);
+        return `↑ ${up} · poměr ${ratio} · (${l.connections || 0} spojení)`;
+      }
+      if (l.status === 'paused') return 'Pozastaveno';
       if (l.status !== 'downloading') return '&mdash;';
       const speed = formatSpeed(l.speed_bps);
-      return speed ? `${l.pct_downloaded}% Staženo · ${speed}` : `${l.pct_downloaded}% Staženo`;
+      const conn = (l.kind && l.kind !== 'http') ? ` (${l.connections || 0} spojení)` : '';
+      const head = speed ? `${l.pct_downloaded}% Staženo · ${speed}` : `${l.pct_downloaded}% Staženo`;
+      return head + conn;
     }
 
     function renderActions(l) {
-      if (l.status === 'downloading') return '<span class="text-muted">—</span>';
-      return `
+      const isTorrent = l.kind && l.kind !== 'http';
+      const del = `
         <form method="post" action="{{ url_for('delete_link') }}" class="d-inline">
           <input type="hidden" name="url" value="${l.url}">
-          <button type="submit" class="btn btn-sm btn-danger" aria-label="Odstranit ${l.url}">
-            Smazat
-          </button>
-        </form>
-      `;
+          <button type="submit" class="btn btn-sm btn-danger" title="Zrušit a smazat">✕</button>
+        </form>`;
+      if (isTorrent && l.status === 'downloading') {
+        return `
+          <form method="post" action="{{ url_for('pause_torrent') }}" class="d-inline">
+            <input type="hidden" name="url" value="${l.url}">
+            <button type="submit" class="btn btn-sm btn-outline-secondary" title="Pozastavit">⏸</button>
+          </form>${del}`;
+      }
+      if (isTorrent && l.status === 'paused') {
+        return `
+          <form method="post" action="{{ url_for('resume_torrent') }}" class="d-inline">
+            <input type="hidden" name="url" value="${l.url}">
+            <button type="submit" class="btn btn-sm btn-outline-primary" title="Obnovit">▶</button>
+          </form>${del}`;
+      }
+      if (l.status === 'seeding') {
+        return `
+          <form method="post" action="{{ url_for('stop_seeding_torrent') }}" class="d-inline">
+            <input type="hidden" name="url" value="${l.url}">
+            <button type="submit" class="btn btn-sm btn-outline-warning" title="Ukončit sdílení">⏹ Ukončit sdílení</button>
+          </form>`;
+      }
+      if (l.status === 'downloading') return '<span class="text-muted">—</span>';
+      const delFallback = `
+        <form method="post" action="{{ url_for('delete_link') }}" class="d-inline">
+          <input type="hidden" name="url" value="${l.url}">
+          <button type="submit" class="btn btn-sm btn-danger" aria-label="Odstranit ${l.url}">Smazat</button>
+        </form>`;
+      return delFallback;
     }
 
     function renderErrors(errors) {

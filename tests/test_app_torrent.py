@@ -244,12 +244,196 @@ def test_delete_file_removes_directory(app_module, client):
     assert not (root / 'torr').exists()
 
 
-def test_link_to_dict_includes_kind(app_module):
+def test_link_to_dict_includes_kind_and_connections(app_module):
     link = app_module.Link(MAGNET)
     link.kind = 'magnet'
+    link.connections = 5
+    link.upload_speed_bps = 2048
+    link.uploaded_bytes = 500
+    link.size_bytes = 1000
     with app_module.app.app_context():
         d = app_module.link_to_dict(link)
     assert d['kind'] == 'magnet'
+    assert d['connections'] == 5
+    assert d['upload_speed_bps'] == 2048
+    assert d['uploaded_bytes'] == 500
+    assert d['ratio'] == 0.5
+
+
+def test_link_to_dict_ratio_zero_when_size_zero(app_module):
+    link = app_module.Link(MAGNET)
+    link.uploaded_bytes = 999
+    link.size_bytes = 0
+    with app_module.app.app_context():
+        d = app_module.link_to_dict(link)
+    assert d['ratio'] == 0.0
+
+
+def _make_torrent_row(
+    app_module, url=MAGNET, kind='magnet',
+    external_id='gidA', status='downloading',
+):
+    with app_module.app.app_context():
+        _, _, row_id = app_module.add_link_if_new(url, kind=kind)
+        db = app_module.get_db()
+        db.execute(
+            'UPDATE links SET external_id = ?, status = ? WHERE id = ?',
+            (external_id, status, row_id),
+        )
+        db.commit()
+
+
+class _AriaStub:
+    def __init__(self):
+        self.calls = []
+
+    def pause(self, gid):
+        self.calls.append(('pause', gid))
+
+    def unpause(self, gid):
+        self.calls.append(('unpause', gid))
+
+    def remove(self, gid):
+        self.calls.append(('remove', gid))
+
+    def remove_download_result(self, gid):
+        self.calls.append(('remove_result', gid))
+
+
+def test_pause_torrent_updates_status(app_module, client, monkeypatch):
+    _enable_torrents(app_module)
+    _make_torrent_row(app_module)
+    stub = _AriaStub()
+    monkeypatch.setattr(
+        app_module.torrent, 'Aria2Client', lambda *a, **kw: stub,
+    )
+    resp = client.post('/torrent/pause', data={'url': MAGNET})
+    assert resp.status_code == 302
+    assert ('pause', 'gidA') in stub.calls
+    with app_module.app.app_context():
+        db = app_module.get_db()
+        row = db.execute(
+            'SELECT status FROM links WHERE url = ?', (MAGNET,),
+        ).fetchone()
+    assert row['status'] == 'paused'
+
+
+def test_pause_torrent_rejects_http(app_module, client):
+    with app_module.app.app_context():
+        app_module.add_link_if_new('https://example.com/x.mp4')
+    resp = client.post(
+        '/torrent/pause', data={'url': 'https://example.com/x.mp4'},
+    )
+    assert resp.status_code == 302
+
+
+def test_pause_torrent_rejects_missing_url(client):
+    resp = client.post('/torrent/pause', data={'url': ''})
+    assert resp.status_code == 302
+
+
+def test_pause_torrent_rejects_before_enqueue(app_module, client):
+    _enable_torrents(app_module)
+    _make_torrent_row(app_module, external_id=None)
+    resp = client.post('/torrent/pause', data={'url': MAGNET})
+    assert resp.status_code == 302
+
+
+def test_pause_torrent_handles_aria_error(app_module, client, monkeypatch):
+    _enable_torrents(app_module)
+    _make_torrent_row(app_module)
+
+    class Bad:
+        def pause(self, gid):
+            raise app_module.torrent.Aria2Error('nope')
+
+    monkeypatch.setattr(
+        app_module.torrent, 'Aria2Client', lambda *a, **kw: Bad(),
+    )
+    resp = client.post('/torrent/pause', data={'url': MAGNET})
+    assert resp.status_code == 302
+    with app_module.app.app_context():
+        db = app_module.get_db()
+        row = db.execute(
+            'SELECT status FROM links WHERE url = ?', (MAGNET,),
+        ).fetchone()
+    assert row['status'] == 'downloading'
+
+
+def test_resume_torrent_updates_status(app_module, client, monkeypatch):
+    _enable_torrents(app_module)
+    _make_torrent_row(app_module, status='paused')
+    stub = _AriaStub()
+    monkeypatch.setattr(
+        app_module.torrent, 'Aria2Client', lambda *a, **kw: stub,
+    )
+    resp = client.post('/torrent/resume', data={'url': MAGNET})
+    assert resp.status_code == 302
+    assert ('unpause', 'gidA') in stub.calls
+    with app_module.app.app_context():
+        db = app_module.get_db()
+        row = db.execute(
+            'SELECT status FROM links WHERE url = ?', (MAGNET,),
+        ).fetchone()
+    assert row['status'] == 'downloading'
+
+
+def test_resume_torrent_rejects_missing_url(client):
+    resp = client.post('/torrent/resume', data={'url': ''})
+    assert resp.status_code == 302
+
+
+def test_resume_torrent_handles_aria_error(app_module, client, monkeypatch):
+    _enable_torrents(app_module)
+    _make_torrent_row(app_module, status='paused')
+
+    class Bad:
+        def unpause(self, gid):
+            raise app_module.torrent.Aria2Error('nope')
+
+    monkeypatch.setattr(
+        app_module.torrent, 'Aria2Client', lambda *a, **kw: Bad(),
+    )
+    resp = client.post('/torrent/resume', data={'url': MAGNET})
+    assert resp.status_code == 302
+
+
+def test_stop_seeding_removes_row_and_calls_aria(
+    app_module, client, monkeypatch,
+):
+    _enable_torrents(app_module)
+    _make_torrent_row(app_module, status='seeding')
+    stub = _AriaStub()
+    monkeypatch.setattr(
+        app_module.torrent, 'Aria2Client', lambda *a, **kw: stub,
+    )
+    resp = client.post(
+        '/torrent/stop-seeding', data={'url': MAGNET},
+    )
+    assert resp.status_code == 302
+    assert ('remove', 'gidA') in stub.calls
+    assert ('remove_result', 'gidA') in stub.calls
+    with app_module.app.app_context():
+        db = app_module.get_db()
+        row = db.execute(
+            'SELECT id FROM links WHERE url = ?', (MAGNET,),
+        ).fetchone()
+    assert row is None
+
+
+def test_stop_seeding_rejects_http(app_module, client):
+    with app_module.app.app_context():
+        app_module.add_link_if_new('https://example.com/x.mp4')
+    resp = client.post(
+        '/torrent/stop-seeding',
+        data={'url': 'https://example.com/x.mp4'},
+    )
+    assert resp.status_code == 302
+
+
+def test_stop_seeding_rejects_missing_url(client):
+    resp = client.post('/torrent/stop-seeding', data={'url': ''})
+    assert resp.status_code == 302
 
 
 def test_torrents_enabled_helper_survives_db_error(app_module, monkeypatch):

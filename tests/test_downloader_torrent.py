@@ -67,6 +67,133 @@ def test_set_external_id_by_id(downloader_module):
     assert row[0] == 'gid99'
 
 
+def test_set_connections_by_id(downloader_module):
+    added, _, row_id = downloader_module.add_link_if_new(MAGNET)
+    assert added
+    assert downloader_module.set_connections_by_id(row_id, 7) is True
+    conn = sqlite3.connect(downloader_module.DB_PATH)
+    try:
+        row = conn.execute(
+            'SELECT connections FROM links WHERE id = ?', (row_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == 7
+
+
+def test_set_connections_by_id_handles_db_error(
+    downloader_module, monkeypatch,
+):
+    class BadConn:
+        def execute(self, *a, **kw):
+            raise sqlite3.Error('locked')
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(downloader_module, 'get_db', lambda: BadConn())
+    assert downloader_module.set_connections_by_id(1, 3) is False
+
+
+def test_set_upload_stats_by_id(downloader_module):
+    added, _, row_id = downloader_module.add_link_if_new(MAGNET)
+    assert added
+    assert downloader_module.set_upload_stats_by_id(row_id, 1024, 999) is True
+    conn = sqlite3.connect(downloader_module.DB_PATH)
+    try:
+        row = conn.execute(
+            'SELECT upload_speed_bps, uploaded_bytes FROM links '
+            'WHERE id = ?', (row_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == 1024
+    assert row[1] == 999
+
+
+def test_set_upload_stats_by_id_handles_db_error(
+    downloader_module, monkeypatch,
+):
+    class BadConn:
+        def execute(self, *a, **kw):
+            raise sqlite3.Error('locked')
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(downloader_module, 'get_db', lambda: BadConn())
+    assert downloader_module.set_upload_stats_by_id(1, 1, 1) is False
+
+
+def test_apply_status_preserves_user_paused(downloader_module, monkeypatch):
+    _seed_torrent_row(
+        downloader_module, MAGNET, 'magnet',
+        external_id='gidP', status='paused',
+    )
+    _enable_torrents_in_db(downloader_module)
+
+    class Client:
+        def tell_status(self, gid):
+            return {
+                'status': 'active', 'totalLength': '100',
+                'completedLength': '10', 'downloadSpeed': '1024',
+                'connections': '2', 'uploadSpeed': '0', 'uploadLength': '0',
+            }
+
+        def is_available(self):
+            return True
+
+    monkeypatch.setattr(
+        downloader_module.torrent, 'Aria2Client', lambda *a, **kw: Client(),
+    )
+    downloader_module.torrent_loop()
+
+    conn = sqlite3.connect(downloader_module.DB_PATH)
+    try:
+        row = conn.execute(
+            'SELECT status FROM links WHERE url = ?', (MAGNET,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == 'paused'
+
+
+def test_torrent_loop_skips_enqueue_when_user_paused(
+    downloader_module, monkeypatch,
+):
+    _seed_torrent_row(
+        downloader_module, MAGNET, 'magnet',
+        external_id=None, status='paused',
+    )
+    _enable_torrents_in_db(downloader_module)
+
+    called = []
+
+    class Client:
+        def is_available(self):
+            return True
+
+        def add_uri(self, *a, **kw):
+            called.append('add_uri')
+            return 'gid'
+
+        def tell_status(self, *a, **kw):
+            called.append('tell_status')
+            return {}
+
+    monkeypatch.setattr(
+        downloader_module.torrent, 'Aria2Client', lambda *a, **kw: Client(),
+    )
+    downloader_module.torrent_loop()
+    assert called == []
+
+
 def test_seeding_enabled_helper(downloader_module):
     assert downloader_module._seeding_enabled(
         {'torrent_seed_mode': 'off', 'torrent_seed_value': 0},
@@ -268,6 +395,7 @@ def test_torrent_loop_polls_active_gid(downloader_module, monkeypatch):
         'totalLength': '1000',
         'completedLength': '500',
         'downloadSpeed': '2048',
+        'connections': '4',
     }
     monkeypatch.setattr(
         downloader_module.torrent, 'Aria2Client', lambda *a, **kw: client,
@@ -278,8 +406,8 @@ def test_torrent_loop_polls_active_gid(downloader_module, monkeypatch):
     conn = sqlite3.connect(downloader_module.DB_PATH)
     try:
         row = conn.execute(
-            'SELECT status, pct_downloaded, size_bytes, speed_bps '
-            'FROM links WHERE url = ?', (MAGNET,),
+            'SELECT status, pct_downloaded, size_bytes, speed_bps, '
+            'connections FROM links WHERE url = ?', (MAGNET,),
         ).fetchone()
     finally:
         conn.close()
@@ -287,6 +415,7 @@ def test_torrent_loop_polls_active_gid(downloader_module, monkeypatch):
     assert row[1] == 50
     assert row[2] == 1000
     assert row[3] == 2048
+    assert row[4] == 4
 
 
 def test_torrent_loop_removes_completed_row(downloader_module, monkeypatch):

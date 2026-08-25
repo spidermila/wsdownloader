@@ -108,7 +108,8 @@ def fetch_active_torrents() -> list[sqlite3.Row]:
     try:
         return db.execute("""
             SELECT id, url, status, pct_downloaded, size_bytes, speed_bps,
-                   kind, external_id
+                   kind, external_id, connections,
+                   upload_speed_bps, uploaded_bytes
              FROM links
              WHERE kind IN ('magnet', 'torrent')
                AND status NOT IN ('failed', 'space_waiting')
@@ -265,6 +266,41 @@ def set_external_id_by_id(row_id: int, external_id: str) -> bool:
         return cur.rowcount > 0
     except sqlite3.Error as exc:
         logger.error('set_external_id_by_id() Database error: %s', exc)
+        return False
+    finally:
+        db.close()
+
+
+def set_connections_by_id(row_id: int, connections: int) -> bool:
+    db = get_db()
+    try:
+        cur = db.execute(
+            'UPDATE links SET connections = ? WHERE id = ?',
+            (int(connections), row_id),
+        )
+        db.commit()
+        return cur.rowcount > 0
+    except sqlite3.Error as exc:
+        logger.error('set_connections_by_id() Database error: %s', exc)
+        return False
+    finally:
+        db.close()
+
+
+def set_upload_stats_by_id(
+    row_id: int, upload_speed_bps: int, uploaded_bytes: int,
+) -> bool:
+    db = get_db()
+    try:
+        cur = db.execute(
+            'UPDATE links SET upload_speed_bps = ?, uploaded_bytes = ? '
+            'WHERE id = ?',
+            (int(upload_speed_bps), int(uploaded_bytes), row_id),
+        )
+        db.commit()
+        return cur.rowcount > 0
+    except sqlite3.Error as exc:
+        logger.error('set_upload_stats_by_id() Database error: %s', exc)
         return False
     finally:
         db.close()
@@ -839,6 +875,9 @@ def _apply_torrent_status(
     total = int(status.get('totalLength') or 0)
     completed = int(status.get('completedLength') or 0)
     speed = int(status.get('downloadSpeed') or 0)
+    connections = int(status.get('connections') or 0)
+    upload_speed = int(status.get('uploadSpeed') or 0)
+    uploaded = int(status.get('uploadLength') or 0)
 
     if total > 0:
         validated = _validate_size_bytes(total)
@@ -849,7 +888,24 @@ def _apply_torrent_status(
             set_pct_downloaded_by_id(row_id, pct)
     if speed != (row['speed_bps'] or 0):
         set_speed_bps_by_id(row_id, max(0, speed))
-    if mapped != row['status']:
+    if connections != (row['connections'] or 0):
+        set_connections_by_id(row_id, max(0, connections))
+    row_keys = row.keys()
+    prev_up_speed = (
+        row['upload_speed_bps'] if 'upload_speed_bps' in row_keys else 0
+    )
+    prev_up_bytes = (
+        row['uploaded_bytes'] if 'uploaded_bytes' in row_keys else 0
+    )
+    if (
+        upload_speed != (prev_up_speed or 0)
+        or uploaded != (prev_up_bytes or 0)
+    ):
+        set_upload_stats_by_id(
+            row_id, max(0, upload_speed), max(0, uploaded),
+        )
+    # Don't clobber user-driven 'paused' status.
+    if mapped != row['status'] and row['status'] != 'paused':
         set_status_downloaded_by_id(row_id, mapped)
 
     if aria_status == 'error':
@@ -876,6 +932,8 @@ def torrent_loop() -> None:
 
     for row in fetch_active_torrents():
         if not row['external_id']:
+            if row['status'] == 'paused':
+                continue
             gid = _enqueue_torrent(row, client, options)
             if gid is None:
                 log_download_error(
