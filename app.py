@@ -34,6 +34,8 @@ from flask_socketio import emit
 from flask_socketio import SocketIO
 from passlib.hash import md5_crypt
 
+import torrent
+
 
 def configure_logging() -> logging.Logger:
     level = os.getenv('LOG_LEVEL', 'INFO').upper()
@@ -116,8 +118,12 @@ class Link:
         self.pct_downloaded = 0
         self.size_bytes = 0
         self.speed_bps = 0
+        self.kind = torrent.KIND_HTTP
+        self.external_id: Optional[str] = None
 
     def get_file_name(self) -> str:
+        if self.kind == torrent.KIND_MAGNET:
+            return _magnet_display_name(self.url)
         try:
             _purl = Path(urlparse(url=self.url).path)
             return _purl.name
@@ -127,6 +133,14 @@ class Link:
 
     def get_human_size(self) -> str:
         return _human_size(self.size_bytes)
+
+
+def _magnet_display_name(url: str) -> str:
+    match = re.search(r'[?&]dn=([^&]+)', url or '')
+    if match:
+        from urllib.parse import unquote_plus
+        return unquote_plus(match.group(1))
+    return url[:60]
 
 
 def get_db() -> sqlite3.Connection:
@@ -156,7 +170,9 @@ def init_db() -> None:
                 status TEXT DEFAULT new,
                 pct_downloaded INTEGER DEFAULT 0,
                 size_bytes INTEGER DEFAULT 0,
-                speed_bps INTEGER DEFAULT 0
+                speed_bps INTEGER DEFAULT 0,
+                kind TEXT NOT NULL DEFAULT 'http',
+                external_id TEXT
             )
         """)
 
@@ -167,7 +183,10 @@ def init_db() -> None:
                 auto_download INTEGER NOT NULL DEFAULT 1,
                 user_name TEXT DEFAULT '',
                 password_hash TEXT DEFAULT '',
-                dark_mode INTEGER NOT NULL DEFAULT 0
+                dark_mode INTEGER NOT NULL DEFAULT 0,
+                torrent_enabled INTEGER NOT NULL DEFAULT 0,
+                torrent_seed_mode TEXT NOT NULL DEFAULT 'off',
+                torrent_seed_value REAL NOT NULL DEFAULT 0
             )
         """)
         conn.execute('INSERT OR IGNORE INTO settings (id) VALUES (1)')
@@ -189,23 +208,43 @@ def init_db() -> None:
         cursor = conn.execute('PRAGMA table_info(settings)')
         columns = [row[1] for row in cursor.fetchall()]
         if 'dark_mode' not in columns:
-            conn.execute("""
-                ALTER TABLE settings
-                ADD COLUMN dark_mode INTEGER NOT NULL DEFAULT 0
-            """)
+            conn.execute(
+                'ALTER TABLE settings ADD COLUMN dark_mode INTEGER '
+                'NOT NULL DEFAULT 0',
+            )
+        if 'torrent_enabled' not in columns:
+            conn.execute(
+                'ALTER TABLE settings ADD COLUMN torrent_enabled INTEGER '
+                'NOT NULL DEFAULT 0',
+            )
+        if 'torrent_seed_mode' not in columns:
+            conn.execute(
+                'ALTER TABLE settings ADD COLUMN torrent_seed_mode TEXT '
+                "NOT NULL DEFAULT 'off'",
+            )
+        if 'torrent_seed_value' not in columns:
+            conn.execute(
+                'ALTER TABLE settings ADD COLUMN torrent_seed_value REAL '
+                'NOT NULL DEFAULT 0',
+            )
 
         cursor = conn.execute('PRAGMA table_info(links)')
         columns = [row[1] for row in cursor.fetchall()]
         if 'size_bytes' not in columns:
-            conn.execute("""
-                ALTER TABLE links
-                ADD COLUMN size_bytes INTEGER DEFAULT 0
-            """)
+            conn.execute(
+                'ALTER TABLE links ADD COLUMN size_bytes INTEGER DEFAULT 0',
+            )
         if 'speed_bps' not in columns:
-            conn.execute("""
-                ALTER TABLE links
-                ADD COLUMN speed_bps INTEGER DEFAULT 0
-            """)
+            conn.execute(
+                'ALTER TABLE links ADD COLUMN speed_bps INTEGER DEFAULT 0',
+            )
+        if 'kind' not in columns:
+            conn.execute(
+                'ALTER TABLE links ADD COLUMN kind TEXT NOT NULL '
+                "DEFAULT 'http'",
+            )
+        if 'external_id' not in columns:
+            conn.execute('ALTER TABLE links ADD COLUMN external_id TEXT')
 
         conn.commit()
     finally:
@@ -215,7 +254,8 @@ def init_db() -> None:
 def get_settings() -> dict:
     db = get_db()
     row = db.execute("""
-        SELECT id, token, auto_download, user_name, password_hash, dark_mode
+        SELECT id, token, auto_download, user_name, password_hash, dark_mode,
+               torrent_enabled, torrent_seed_mode, torrent_seed_value
         FROM settings WHERE id = 1
     """).fetchone()
     if not row:
@@ -226,6 +266,9 @@ def get_settings() -> dict:
             'user_name': '',
             'password_hash': '',
             'dark_mode': 0,
+            'torrent_enabled': 0,
+            'torrent_seed_mode': 'off',
+            'torrent_seed_value': 0,
         }
     return dict(row)
 
@@ -370,25 +413,30 @@ def dequeue_file(token: str, file_id: str) -> str | None:
     return None
 
 
+def _row_to_link(row) -> Link:
+    link = Link(url=row['url'])
+    link.status = row['status']
+    link.pct_downloaded = row['pct_downloaded']
+    link.size_bytes = row['size_bytes']
+    link.speed_bps = row['speed_bps'] or 0
+    if 'kind' in row.keys():
+        link.kind = row['kind'] or torrent.KIND_HTTP
+    if 'external_id' in row.keys():
+        link.external_id = row['external_id']
+    return link
+
+
 def read_links_from_db() -> list[Link]:
     db = get_db()
     rows = db.execute("""
         SELECT id, url, created_at, status, pct_downloaded, size_bytes,
-               speed_bps
+               speed_bps, kind, external_id
         FROM links ORDER by created_at DESC
     """).fetchall()
-    links: list[Link] = []
     if len(rows) == 0:
         logger.info('read_links_from_db() No links found in database')
-        return links
-    for row in rows:
-        _link = Link(url=row['url'])
-        _link.status = row['status']
-        _link.pct_downloaded = row['pct_downloaded']
-        _link.size_bytes = row['size_bytes']
-        _link.speed_bps = row['speed_bps'] or 0
-        links.append(_link)
-    return links
+        return []
+    return [_row_to_link(row) for row in rows]
 
 
 def read_download_errors() -> list[dict]:
@@ -414,7 +462,26 @@ def delete_download_error(file_id: str) -> bool:
     return cur.rowcount > 0
 
 
+MAGNET_RE = re.compile(
+    r'^magnet:\?(?:[a-zA-Z0-9._%+-]+=[^&\s]+&?)+$',
+)
+
+
+def _torrents_enabled() -> bool:
+    try:
+        return bool(get_settings().get('torrent_enabled'))
+    except Exception:
+        return False
+
+
 def validate_url(url) -> str:
+    if url and url.startswith('magnet:?'):
+        if not _torrents_enabled():
+            return 'Torrenty nejsou povoleny. Zapněte je v nastavení.'
+        if not MAGNET_RE.fullmatch(url) or 'xt=urn:btih:' not in url.lower():
+            return 'Neplatný magnet link.'
+        return 'ok'
+
     URL_RE = re.compile(
         r"""
     ^
@@ -448,6 +515,10 @@ def validate_url(url) -> str:
             'Invalid URL scheme: %s, allowed: %s', p.scheme, allowed_schemes,
         )
         return 'Neplatný link.'
+
+    if torrent.classify(url) == torrent.KIND_TORRENT \
+            and not _torrents_enabled():
+        return 'Torrenty nejsou povoleny. Zapněte je v nastavení.'
 
     if p.port is not None and not (0 <= p.port <= 65535):
         logger.error('Invalid URL port: %s', p.port)
@@ -487,7 +558,9 @@ def test_url(url: str) -> tuple[bool, Optional[int]]:
     return (False, None)
 
 
-def add_link_if_new(link_raw: str) -> tuple[bool, str, Optional[int]]:
+def add_link_if_new(
+    link_raw: str, kind: str = torrent.KIND_HTTP,
+) -> tuple[bool, str, Optional[int]]:
     url = (link_raw or '').strip()
     if not url:
         return (False, '', None)
@@ -495,13 +568,16 @@ def add_link_if_new(link_raw: str) -> tuple[bool, str, Optional[int]]:
     db = get_db()
     try:
         cur = db.execute(
-            'INSERT OR IGNORE INTO links (url) VALUES (?)', (url,),
+            'INSERT OR IGNORE INTO links (url, kind) VALUES (?, ?)',
+            (url, kind),
         )
         db.commit()
         added = cur.rowcount > 0
         row_id = cur.lastrowid if added else None
         if added:
-            logger.info('add_link_if_new() Link added: %s', url)
+            logger.info(
+                'add_link_if_new() Link added (kind=%s): %s', kind, url,
+            )
         else:
             logger.warning('add_link_if_new() Link already exists: %s', url)
         return (added, url, row_id)
@@ -586,6 +662,17 @@ def get_fs_usage(base_path: Optional[Path] = None) -> dict:
         }
 
 
+def _dir_size(path: Path) -> int:
+    total = 0
+    for sub in path.rglob('*'):
+        if sub.is_file():
+            try:
+                total += sub.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
 def list_downloaded_files() -> list[dict]:
     files: list[dict] = []
     try:
@@ -593,11 +680,19 @@ def list_downloaded_files() -> list[dict]:
         if not root.exists():
             return files
         for p in sorted(root.iterdir(), key=lambda x: x.name.lower()):
-            if p.is_file() and p.name[0] != '.':
-                stat = p.stat()
+            if p.name[0] == '.':
+                continue
+            if p.is_file():
                 files.append({
                     'name': p.name,
-                    'size': _human_size(stat.st_size),
+                    'size': _human_size(p.stat().st_size),
+                    'is_dir': False,
+                })
+            elif p.is_dir():
+                files.append({
+                    'name': p.name,
+                    'size': _human_size(_dir_size(p)),
+                    'is_dir': True,
                 })
     except Exception as e:
         logger.error(
@@ -643,7 +738,7 @@ def get_db_state_hash() -> str:
         if DOWNLOADS_PATH.exists():
             files = sorted([
                 f.name for f in DOWNLOADS_PATH.iterdir()
-                if f.is_file() and f.name[0] != '.'
+                if f.name[0] != '.'
             ])
             state_parts.extend(files)
 
@@ -677,7 +772,7 @@ def monitor_database_changes():
                 conn.row_factory = sqlite3.Row
                 rows = conn.execute("""
                     SELECT url, status, pct_downloaded, size_bytes,
-                           speed_bps
+                           speed_bps, kind, external_id
                     FROM links ORDER BY created_at DESC
                 """).fetchall()
 
@@ -689,14 +784,7 @@ def monitor_database_changes():
                 """).fetchall()
                 conn.close()
 
-                links = []
-                for row in rows:
-                    link = Link(url=row['url'])
-                    link.status = row['status']
-                    link.pct_downloaded = row['pct_downloaded']
-                    link.size_bytes = row['size_bytes']
-                    link.speed_bps = row['speed_bps'] or 0
-                    links.append(link)
+                links = [_row_to_link(row) for row in rows]
 
                 errors = [dict(row) for row in error_rows]
                 files = list_downloaded_files()
@@ -746,37 +834,54 @@ def before_request():
         _appHasRunBefore = True
 
 
+def _handle_http_add(url_input: str) -> None:
+    url_ok, content_length = test_url(url_input)
+    if not url_ok:
+        logger.error('index() Link nedostupný, input was: %s', url_input)
+        flash('Link nedostupný', 'error')
+        return
+    added, value, row_id = add_link_if_new(url_input)
+    if not added:
+        flash(f"Již existuje: {value}", 'warning')
+        return
+    logger.info('index() HTTP link added: %s', value)
+    flash(f"Přidáno: {value}", 'success')
+    new_link = Link(value)
+    if row_id is not None and content_length is not None:
+        set_file_size_by_id(row_id, content_length)
+        new_link.size_bytes = content_length
+    socketio.emit('link_added', link_to_dict(new_link))
+
+
+def _handle_torrent_add(url_input: str, kind: str) -> None:
+    added, value, _row_id = add_link_if_new(url_input, kind=kind)
+    if not added:
+        flash(f"Již existuje: {value}", 'warning')
+        return
+    logger.info('index() Torrent link added (kind=%s): %s', kind, value)
+    flash(f"Přidáno (torrent): {value}", 'success')
+    new_link = Link(value)
+    new_link.kind = kind
+    socketio.emit('link_added', link_to_dict(new_link))
+
+
 @app.route('/', methods=['GET', 'POST'])
 def index():
     if request.method == 'POST':
         url_input = request.form.get('link', '')
         val_message = validate_url(url_input)
-        url_ok, content_length = (
-            test_url(url_input) if val_message == 'ok' else (False, None)
-        )
-
-        if val_message == 'ok' and not url_ok:
-            message = 'Link nedostupný'
-            logger.error('index() %s, input was: %s', message, url_input)
-            flash(message, 'error')
-        elif val_message != 'ok':
+        if val_message != 'ok':
             logger.error(
                 'index() URL validation failed, input was: %s', url_input,
             )
             flash(val_message, 'error')
+            return redirect(url_for('index'))
+
+        kind = torrent.classify(url_input)
+        if kind == torrent.KIND_HTTP:
+            _handle_http_add(url_input)
         else:
-            added, value, row_id = add_link_if_new(url_input)
-            if added:
-                logger.info('index() Link added: %s', value)
-                flash(f"Přidáno: {value}", 'success')
-                new_link = Link(value)
-                if row_id is not None and content_length is not None:
-                    set_file_size_by_id(row_id, content_length)
-                    new_link.size_bytes = content_length
-                socketio.emit('link_added', link_to_dict(new_link))
-            else:
-                logger.info('index() Link already exists: %s', value)
-                flash(f"Již existuje: {value}", 'warning')
+            _handle_torrent_add(url_input, kind)
         return redirect(url_for('index'))
 
     links = read_links_from_db()
@@ -863,6 +968,20 @@ def logout():
     return redirect(url_for('index'))
 
 
+def _remove_from_aria2(external_id: str) -> None:
+    if not external_id:
+        return
+    try:
+        client = torrent.Aria2Client()
+        client.remove(external_id)
+        client.remove_download_result(external_id)
+    except torrent.Aria2Error as exc:
+        logger.warning(
+            '_remove_from_aria2() Failed to remove GID %s: %s',
+            external_id, exc,
+        )
+
+
 @app.route('/delete', methods=['POST'])
 def delete_link():
     url_to_delete = (request.form.get('url') or '').strip()
@@ -872,10 +991,16 @@ def delete_link():
         return redirect(url_for('index'))
 
     db = get_db()
+    row = db.execute(
+        'SELECT kind, external_id FROM links WHERE url = ?',
+        (url_to_delete,),
+    ).fetchone()
     cur = db.execute('DELETE FROM links WHERE url = ?', (url_to_delete,))
     db.commit()
 
     if cur.rowcount > 0:
+        if row is not None and row['kind'] != torrent.KIND_HTTP:
+            _remove_from_aria2(row['external_id'])
         logger.info('delete_link() Link deleted: %s', url_to_delete)
         flash(f"Odstraněno: {url_to_delete}", 'success')
         socketio.emit('link_deleted', {'url': url_to_delete})
@@ -910,6 +1035,11 @@ def delete_file():
             _clear_file_caches(candidate)
             logger.info('delete_file() File deleted: %s', candidate)
             flash(f"Odstraněn soubor: {filename}", 'success')
+            socketio.emit('file_deleted', {'filename': filename})
+        elif candidate.exists() and candidate.is_dir():
+            shutil.rmtree(candidate)
+            logger.info('delete_file() Directory deleted: %s', candidate)
+            flash(f"Odstraněna složka: {filename}", 'success')
             socketio.emit('file_deleted', {'filename': filename})
         else:
             logger.warning('delete_file() File not found: %s', candidate)
@@ -1030,6 +1160,37 @@ def update_auto_download():
     )
     flash(
         f'Automatické stahování {"zapnuto" if enabled else "vypnuto"}.',
+        'success',
+    )
+    return redirect(url_for('index'))
+
+
+@app.post('/settings/torrent')
+def update_torrent_settings():
+    enabled = 1 if request.form.get('torrent_enabled') else 0
+    seed_mode = (request.form.get('torrent_seed_mode') or 'off').strip()
+    if seed_mode not in ('off', 'ratio', 'time'):
+        seed_mode = 'off'
+    try:
+        seed_value = float(request.form.get('torrent_seed_value') or 0)
+    except ValueError:
+        seed_value = 0.0
+    if seed_value < 0:
+        seed_value = 0.0
+
+    db = get_db()
+    db.execute(
+        'UPDATE settings SET torrent_enabled = ?, torrent_seed_mode = ?, '
+        'torrent_seed_value = ? WHERE id = 1',
+        (enabled, seed_mode, seed_value),
+    )
+    db.commit()
+    logger.info(
+        'update_torrent_settings() torrent_enabled=%d seed_mode=%s '
+        'seed_value=%s', enabled, seed_mode, seed_value,
+    )
+    flash(
+        f'Torrenty {"zapnuty" if enabled else "vypnuty"}.',
         'success',
     )
     return redirect(url_for('index'))
@@ -1222,6 +1383,7 @@ def link_to_dict(link: Link) -> dict:
         'human_size': link.get_human_size(),
         'speed_bps': link.speed_bps,
         'human_speed': _human_speed(link.speed_bps),
+        'kind': link.kind,
     }
 
 

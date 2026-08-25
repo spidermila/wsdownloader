@@ -11,6 +11,37 @@ init_db()
 print("DB initialized")
 PY
 
+# Read (or generate) the aria2 RPC secret so it is shared with the daemon
+# and with app.py / downloader.py which read it via torrent.read_or_create_secret().
+ARIA2_RPC_SECRET="${ARIA2_RPC_SECRET:-$(python -c 'from torrent import read_or_create_secret; print(read_or_create_secret())')}"
+export ARIA2_RPC_SECRET
+: "${ARIA2_LISTEN_PORT:=51413}"
+: "${ARIA2_ENABLE_DHT:=true}"
+
+# Launch aria2 in RPC mode.  Bound to 127.0.0.1 with a shared secret; the
+# BT peer port (51413) is only exposed if the operator publishes it via -p.
+aria2c \
+  --enable-rpc=true \
+  --rpc-listen-all=false \
+  --rpc-listen-port=6800 \
+  --rpc-secret="${ARIA2_RPC_SECRET}" \
+  --dir="${DOWNLOADS_DIR:-/downloads}" \
+  --continue=true \
+  --auto-file-renaming=false \
+  --save-session="${DATA_DIR:-/data}/aria2.session" \
+  --save-session-interval=30 \
+  --input-file="${DATA_DIR:-/data}/aria2.session" \
+  --enable-dht="${ARIA2_ENABLE_DHT}" \
+  --enable-peer-exchange=true \
+  --bt-enable-lpd=true \
+  --listen-port="${ARIA2_LISTEN_PORT}" \
+  --dht-listen-port="${ARIA2_LISTEN_PORT}" \
+  --seed-time=0 \
+  --max-connection-per-server=8 \
+  --split=8 \
+  --daemon=false &
+ARIA_PID=$!
+
 # Start web (Gunicorn + gevent for proper async concurrency with Flask-SocketIO)
 # WEB_CONCURRENCY controls the number of gevent workers (each handles thousands of
 # concurrent greenlets, so 1-2 workers is typically enough).
@@ -34,25 +65,49 @@ DL_PID=$!
 
 term_handler() {
   echo "Stopping..."
-  kill -TERM "$APP_PID" "$DL_PID" 2>/dev/null || true
-  wait "$APP_PID" "$DL_PID" 2>/dev/null || true
+  kill -TERM "$APP_PID" "$DL_PID" "$ARIA_PID" 2>/dev/null || true
+  wait "$APP_PID" "$DL_PID" "$ARIA_PID" 2>/dev/null || true
   exit 143
 }
 trap term_handler SIGTERM SIGINT
 
-# Monitor both; if one dies, stop the other
+# Monitor gunicorn + downloader; if one dies, stop the others.  aria2 is
+# allowed to crash and be restarted independently (rare, and the DL loop
+# tolerates a brief RPC outage).
+restart_aria2() {
+  echo "aria2 stopped; restarting..."
+  aria2c \
+    --enable-rpc=true --rpc-listen-all=false --rpc-listen-port=6800 \
+    --rpc-secret="${ARIA2_RPC_SECRET}" \
+    --dir="${DOWNLOADS_DIR:-/downloads}" \
+    --continue=true --auto-file-renaming=false \
+    --save-session="${DATA_DIR:-/data}/aria2.session" \
+    --save-session-interval=30 \
+    --input-file="${DATA_DIR:-/data}/aria2.session" \
+    --enable-dht="${ARIA2_ENABLE_DHT}" \
+    --enable-peer-exchange=true --bt-enable-lpd=true \
+    --listen-port="${ARIA2_LISTEN_PORT}" \
+    --dht-listen-port="${ARIA2_LISTEN_PORT}" \
+    --seed-time=0 --max-connection-per-server=8 --split=8 \
+    --daemon=false &
+  ARIA_PID=$!
+}
+
 while true; do
   if ! kill -0 "$APP_PID" 2>/dev/null; then
-    echo "gunicorn stopped; terminating downloader..."
-    kill -TERM "$DL_PID" 2>/dev/null || true
-    wait "$DL_PID" 2>/dev/null || true
+    echo "gunicorn stopped; terminating downloader and aria2..."
+    kill -TERM "$DL_PID" "$ARIA_PID" 2>/dev/null || true
+    wait "$DL_PID" "$ARIA_PID" 2>/dev/null || true
     exit 1
   fi
   if ! kill -0 "$DL_PID" 2>/dev/null; then
-    echo "downloader stopped; terminating web..."
-    kill -TERM "$APP_PID" 2>/dev/null || true
-    wait "$APP_PID" 2>/dev/null || true
+    echo "downloader stopped; terminating web and aria2..."
+    kill -TERM "$APP_PID" "$ARIA_PID" 2>/dev/null || true
+    wait "$APP_PID" "$ARIA_PID" 2>/dev/null || true
     exit 1
+  fi
+  if ! kill -0 "$ARIA_PID" 2>/dev/null; then
+    restart_aria2
   fi
   sleep 2
 done
