@@ -3,6 +3,7 @@ import os
 import shutil
 import sqlite3
 import sys
+import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from time import sleep
@@ -13,6 +14,8 @@ from typing import TypedDict
 import requests
 from requests import HTTPError
 from requests import RequestException
+
+import torrent
 
 
 def configure_logging() -> logging.Logger:
@@ -87,11 +90,25 @@ def get_db() -> sqlite3.Connection:
 def fetch_oldest() -> Optional[sqlite3.Row]:
     db = get_db()
     return db.execute("""
-        SELECT id, url, created_at, status, pct_downloaded, size_bytes
+        SELECT id, url, created_at, status, pct_downloaded, size_bytes,
+               kind, external_id
          FROM links
          WHERE status NOT IN ('connection_failed', 'failed', 'space_waiting')
+           AND (kind IS NULL OR kind = 'http')
          ORDER BY created_at ASC LIMIT 1
     """).fetchone()
+
+
+def fetch_active_torrents() -> list[sqlite3.Row]:
+    db = get_db()
+    return db.execute("""
+        SELECT id, url, status, pct_downloaded, size_bytes, speed_bps,
+               kind, external_id
+         FROM links
+         WHERE kind IN ('magnet', 'torrent')
+           AND status NOT IN ('failed', 'space_waiting')
+         ORDER BY created_at ASC
+    """).fetchall()
 
 
 def delete_by_id(row_id: int) -> int:
@@ -209,7 +226,8 @@ def set_status_downloaded_by_id(row_id: int, new_status: str) -> bool:
 def get_settings() -> dict:
     db = get_db()
     row = db.execute("""
-        SELECT id, token, auto_download, user_name, password_hash
+        SELECT id, token, auto_download, user_name, password_hash,
+               torrent_enabled, torrent_seed_mode, torrent_seed_value
         FROM settings WHERE id = 1
     """).fetchone()
     if not row:
@@ -219,8 +237,27 @@ def get_settings() -> dict:
             'auto_download': 0,
             'user_name': '',
             'password_hash': '',
+            'torrent_enabled': 0,
+            'torrent_seed_mode': 'off',
+            'torrent_seed_value': 0,
         }
     return dict(row)
+
+
+def set_external_id_by_id(row_id: int, external_id: str) -> bool:
+    db = get_db()
+    try:
+        cur = db.execute(
+            'UPDATE links SET external_id = ? WHERE id = ?',
+            (external_id, row_id),
+        )
+        db.commit()
+        return cur.rowcount > 0
+    except sqlite3.Error as exc:
+        logger.error('set_external_id_by_id() Database error: %s', exc)
+        return False
+    finally:
+        db.close()
 
 
 def get_fs_usage(base_path: Optional[Path] = None) -> dict:
@@ -733,9 +770,137 @@ def main_loop() -> None:
         sleep(10)
 
 
+def _seeding_enabled(settings: dict) -> bool:
+    mode = settings.get('torrent_seed_mode') or 'off'
+    value = float(settings.get('torrent_seed_value') or 0)
+    return mode in ('ratio', 'time') and value > 0
+
+
+def _fetch_torrent_bytes(url: str) -> Optional[bytes]:
+    try:
+        response = requests.get(url, allow_redirects=True, timeout=30)
+        response.raise_for_status()
+        return response.content
+    except RequestException as exc:
+        logger.error(
+            '_fetch_torrent_bytes() Failed to fetch %s: %s', url, exc,
+        )
+        return None
+
+
+def _enqueue_torrent(
+    row: sqlite3.Row, client: 'torrent.Aria2Client', options: dict,
+) -> Optional[str]:
+    kind = row['kind']
+    url = row['url']
+    if kind == torrent.KIND_MAGNET:
+        return client.add_uri(url, options)
+    payload = _fetch_torrent_bytes(url)
+    if payload is None:
+        return None
+    return client.add_torrent(payload, options)
+
+
+def _apply_torrent_status(
+    row: sqlite3.Row, status: dict, seeding_enabled: bool,
+    client: 'torrent.Aria2Client',
+) -> None:
+    row_id = row['id']
+    aria_status = status.get('status', '')
+    mapped = torrent.map_status(aria_status, seeding_enabled)
+
+    total = int(status.get('totalLength') or 0)
+    completed = int(status.get('completedLength') or 0)
+    speed = int(status.get('downloadSpeed') or 0)
+
+    if total > 0:
+        validated = _validate_size_bytes(total)
+        if validated is not None and validated != row['size_bytes']:
+            set_file_size_by_id(row_id, validated)
+        pct = max(0, min(int(completed / total * 100), 100))
+        if pct != row['pct_downloaded']:
+            set_pct_downloaded_by_id(row_id, pct)
+    if speed != (row['speed_bps'] or 0):
+        set_speed_bps_by_id(row_id, max(0, speed))
+    if mapped != row['status']:
+        set_status_downloaded_by_id(row_id, mapped)
+
+    if aria_status == 'error':
+        gid = row['external_id'] or ''
+        message = status.get('errorMessage', '') or 'Unknown error'
+        log_download_error(gid, row['url'], 'Torrent error', message)
+        try:
+            client.remove_download_result(gid)
+        except torrent.Aria2Error:
+            pass
+    elif aria_status == 'complete' and not seeding_enabled:
+        gid = row['external_id'] or ''
+        try:
+            client.remove_download_result(gid)
+        except torrent.Aria2Error:
+            pass
+        delete_by_id(row_id)
+
+
+def torrent_loop() -> None:
+    settings = get_settings()
+    if not settings.get('torrent_enabled'):
+        return
+
+    client = torrent.Aria2Client()
+    if not client.is_available():
+        return
+
+    seeding_enabled = _seeding_enabled(settings)
+    options = torrent.seed_options(
+        settings.get('torrent_seed_mode') or 'off',
+        float(settings.get('torrent_seed_value') or 0),
+    )
+
+    for row in fetch_active_torrents():
+        if not row['external_id']:
+            gid = _enqueue_torrent(row, client, options)
+            if gid is None:
+                log_download_error(
+                    row['url'], row['url'],
+                    'Torrent error', 'Failed to enqueue torrent',
+                )
+                set_status_downloaded_by_id(row['id'], 'failed')
+                continue
+            set_external_id_by_id(row['id'], gid)
+            set_status_downloaded_by_id(row['id'], 'downloading')
+            continue
+        try:
+            status = client.tell_status(row['external_id'])
+        except torrent.Aria2Error as exc:
+            logger.warning(
+                'torrent_loop() tellStatus failed for GID %s: %s',
+                row['external_id'], exc,
+            )
+            continue
+        _apply_torrent_status(row, status, seeding_enabled, client)
+
+
+def torrent_worker(stop_event: threading.Event, interval: int = 3) -> None:
+    while not stop_event.is_set():
+        try:
+            torrent_loop()
+        except Exception as exc:  # keep the thread alive on unexpected errors
+            logger.error('torrent_worker() unhandled error: %s', exc)
+        stop_event.wait(interval)
+
+
 def main():
-    while True:
-        main_loop()
+    stop_event = threading.Event()
+    worker = threading.Thread(
+        target=torrent_worker, args=(stop_event,), daemon=True,
+    )
+    worker.start()
+    try:
+        while True:
+            main_loop()
+    finally:
+        stop_event.set()
 
 
 if __name__ == '__main__':

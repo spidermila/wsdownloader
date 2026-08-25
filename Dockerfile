@@ -16,7 +16,7 @@ LABEL org.opencontainers.image.title="wsdownloader" \
       org.opencontainers.image.created=$BUILD_DATE
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    tini curl procps ffmpeg\
+    tini curl procps ffmpeg aria2 \
  && rm -rf /var/lib/apt/lists/*
 
 ENV PYTHONUNBUFFERED=1 \
@@ -29,7 +29,7 @@ WORKDIR /app
 COPY requirements/prod.txt /app/requirements.txt
 RUN pip install --no-cache-dir --require-hashes -r /app/requirements.txt
 
-COPY app.py downloader.py /app/
+COPY app.py downloader.py torrent.py /app/
 COPY templates/ /app/templates/
 
 # Create download path and data path
