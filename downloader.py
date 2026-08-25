@@ -801,14 +801,29 @@ def _enqueue_torrent(
     return client.add_torrent(payload, options)
 
 
+def _try_remove_result(client: 'torrent.Aria2Client', gid: str) -> None:
+    if not gid:
+        return
+    try:
+        client.remove_download_result(gid)
+    except torrent.Aria2Error:
+        pass
+
+
 def _apply_torrent_status(
     row: sqlite3.Row, status: dict, seeding_enabled: bool,
     client: 'torrent.Aria2Client',
 ) -> None:
     row_id = row['id']
     aria_status = status.get('status', '')
-    mapped = torrent.map_status(aria_status, seeding_enabled)
 
+    # Row about to be deleted — skip progress writes.
+    if aria_status == 'complete' and not seeding_enabled:
+        _try_remove_result(client, row['external_id'] or '')
+        delete_by_id(row_id)
+        return
+
+    mapped = torrent.map_status(aria_status, seeding_enabled)
     total = int(status.get('totalLength') or 0)
     completed = int(status.get('completedLength') or 0)
     speed = int(status.get('downloadSpeed') or 0)
@@ -829,17 +844,7 @@ def _apply_torrent_status(
         gid = row['external_id'] or ''
         message = status.get('errorMessage', '') or 'Unknown error'
         log_download_error(gid, row['url'], 'Torrent error', message)
-        try:
-            client.remove_download_result(gid)
-        except torrent.Aria2Error:
-            pass
-    elif aria_status == 'complete' and not seeding_enabled:
-        gid = row['external_id'] or ''
-        try:
-            client.remove_download_result(gid)
-        except torrent.Aria2Error:
-            pass
-        delete_by_id(row_id)
+        _try_remove_result(client, gid)
 
 
 def torrent_loop() -> None:

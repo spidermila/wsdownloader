@@ -140,10 +140,17 @@ class Aria2Client:
             return False
 
 
+# Minutes in a year — effectively "no time limit" when seeding by ratio.
+_SEED_TIME_UNLIMITED_MIN = 525600
+
+
 def seed_options(mode: str, value: float) -> dict:
     """Translate settings.torrent_seed_* into aria2 per-download options."""
     if mode == 'ratio' and value > 0:
-        return {'seed-ratio': f'{value}', 'seed-time': '525600'}
+        return {
+            'seed-ratio': f'{value}',
+            'seed-time': f'{_SEED_TIME_UNLIMITED_MIN}',
+        }
     if mode == 'time' and value > 0:
         return {'seed-time': f'{int(value)}', 'seed-ratio': '0.0'}
     return {'seed-time': '0', 'seed-ratio': '0.0'}

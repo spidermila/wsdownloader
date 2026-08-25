@@ -470,7 +470,7 @@ MAGNET_RE = re.compile(
 def _torrents_enabled() -> bool:
     try:
         return bool(get_settings().get('torrent_enabled'))
-    except Exception:
+    except sqlite3.Error:
         return False
 
 

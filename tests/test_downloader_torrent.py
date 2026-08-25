@@ -532,6 +532,13 @@ def test_apply_status_complete_ignores_remove_failure(
     assert row is None
 
 
+def test_try_remove_result_noop_on_empty_gid(downloader_module):
+    class Client:
+        def remove_download_result(self, gid):
+            raise AssertionError('should not be called')
+    downloader_module._try_remove_result(Client(), '')
+
+
 def test_main_starts_worker_and_stops_on_exception(
     downloader_module, monkeypatch,
 ):
