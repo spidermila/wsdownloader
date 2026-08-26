@@ -228,9 +228,11 @@ def test_remove_and_change_option(torrent_module, monkeypatch):
     monkeypatch.setattr(torrent_module.requests, 'post', fake_post)
     client = torrent_module.Aria2Client(secret=TEST_RPC_SECRET)
     client.remove('g')
+    client.force_remove('g')
     client.remove_download_result('g')
     client.change_option('g', {'seed-ratio': '1.0'})
     assert seen == [
+        'aria2.remove',
         'aria2.forceRemove',
         'aria2.removeDownloadResult',
         'aria2.changeOption',
@@ -292,3 +294,24 @@ def test_map_status_transitions(torrent_module):
     assert torrent_module.map_status('error', False) == 'failed'
     assert torrent_module.map_status('removed', False) == 'failed'
     assert torrent_module.map_status('unknown-state', False) == 'new'
+
+
+def test_parse_select_file_indices_filters_and_sorts(torrent_module):
+    assert torrent_module.parse_select_file_indices(
+        ['3', '1', '2', '2', '99', 'x', '', '0', '-1'], file_count=5,
+    ) == [1, 2, 3]
+
+
+def test_parse_select_file_indices_empty(torrent_module):
+    assert torrent_module.parse_select_file_indices([], file_count=5) == []
+
+
+def test_global_limit_options(torrent_module):
+    assert torrent_module.global_limit_options(1024, 0) == {
+        'max-overall-download-limit': '1024',
+        'max-overall-upload-limit': '0',
+    }
+    assert torrent_module.global_limit_options(-5, None) == {
+        'max-overall-download-limit': '0',
+        'max-overall-upload-limit': '0',
+    }

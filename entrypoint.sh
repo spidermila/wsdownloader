@@ -21,31 +21,60 @@ export ARIA2_RPC_SECRET
 # aria2 refuses to start if --input-file points at a missing path.
 touch "${DATA_DIR:-/data}/aria2.session"
 
+# Persisted global speed limits (bytes/s, 0 = unlimited) from the settings
+# table; read once at startup and passed to aria2. Runtime changes are pushed
+# via aria2.changeGlobalOption by app.py.
+eval "$(python - <<'PY'
+import os, sqlite3
+db = os.environ.get('DB_PATH') or f"{os.environ.get('DATA_DIR', '/data')}/downloader.db"
+dl = ul = 0
+try:
+    c = sqlite3.connect(db)
+    r = c.execute(
+        'SELECT torrent_max_dl_bps, torrent_max_ul_bps '
+        'FROM settings WHERE id = 1'
+    ).fetchone()
+    if r:
+        dl, ul = int(r[0] or 0), int(r[1] or 0)
+    c.close()
+except Exception:
+    pass
+print(f'ARIA2_MAX_DL_BPS={dl}; ARIA2_MAX_UL_BPS={ul}')
+PY
+)"
+export ARIA2_MAX_DL_BPS ARIA2_MAX_UL_BPS
+
+start_aria2() {
+  aria2c \
+    --enable-rpc=true \
+    --rpc-listen-all=false \
+    --rpc-listen-port=6800 \
+    --rpc-secret="${ARIA2_RPC_SECRET}" \
+    --dir="${DOWNLOADS_DIR:-/downloads}" \
+    --continue=true \
+    --auto-file-renaming=false \
+    --save-session="${DATA_DIR:-/data}/aria2.session" \
+    --save-session-interval=30 \
+    --input-file="${DATA_DIR:-/data}/aria2.session" \
+    --bt-save-metadata=true \
+    --rpc-save-upload-metadata=false \
+    --enable-dht="${ARIA2_ENABLE_DHT}" \
+    --enable-peer-exchange=true \
+    --bt-enable-lpd=true \
+    --listen-port="${ARIA2_LISTEN_PORT}" \
+    --dht-listen-port="${ARIA2_LISTEN_PORT}" \
+    --seed-time=0 \
+    --max-connection-per-server=8 \
+    --split=8 \
+    --max-overall-download-limit="${ARIA2_MAX_DL_BPS}" \
+    --max-overall-upload-limit="${ARIA2_MAX_UL_BPS}" \
+    --daemon=false &
+  ARIA_PID=$!
+}
+
 # Launch aria2 in RPC mode.  Bound to 127.0.0.1 with a shared secret; the
 # BT peer port (51413) is only exposed if the operator publishes it via -p.
-aria2c \
-  --enable-rpc=true \
-  --rpc-listen-all=false \
-  --rpc-listen-port=6800 \
-  --rpc-secret="${ARIA2_RPC_SECRET}" \
-  --dir="${DOWNLOADS_DIR:-/downloads}" \
-  --continue=true \
-  --auto-file-renaming=false \
-  --save-session="${DATA_DIR:-/data}/aria2.session" \
-  --save-session-interval=30 \
-  --input-file="${DATA_DIR:-/data}/aria2.session" \
-  --bt-save-metadata=false \
-  --rpc-save-upload-metadata=false \
-  --enable-dht="${ARIA2_ENABLE_DHT}" \
-  --enable-peer-exchange=true \
-  --bt-enable-lpd=true \
-  --listen-port="${ARIA2_LISTEN_PORT}" \
-  --dht-listen-port="${ARIA2_LISTEN_PORT}" \
-  --seed-time=0 \
-  --max-connection-per-server=8 \
-  --split=8 \
-  --daemon=false &
-ARIA_PID=$!
+start_aria2
 
 # Start web (Gunicorn + gevent for proper async concurrency with Flask-SocketIO)
 # WEB_CONCURRENCY controls the number of gevent workers (each handles thousands of
@@ -82,23 +111,7 @@ trap term_handler SIGTERM SIGINT
 restart_aria2() {
   echo "aria2 stopped; restarting..."
   touch "${DATA_DIR:-/data}/aria2.session"
-  aria2c \
-    --enable-rpc=true --rpc-listen-all=false --rpc-listen-port=6800 \
-    --rpc-secret="${ARIA2_RPC_SECRET}" \
-    --dir="${DOWNLOADS_DIR:-/downloads}" \
-    --continue=true --auto-file-renaming=false \
-    --save-session="${DATA_DIR:-/data}/aria2.session" \
-    --save-session-interval=30 \
-    --input-file="${DATA_DIR:-/data}/aria2.session" \
-    --bt-save-metadata=false \
-    --rpc-save-upload-metadata=false \
-    --enable-dht="${ARIA2_ENABLE_DHT}" \
-    --enable-peer-exchange=true --bt-enable-lpd=true \
-    --listen-port="${ARIA2_LISTEN_PORT}" \
-    --dht-listen-port="${ARIA2_LISTEN_PORT}" \
-    --seed-time=0 --max-connection-per-server=8 --split=8 \
-    --daemon=false &
-  ARIA_PID=$!
+  start_aria2
 }
 
 while true; do

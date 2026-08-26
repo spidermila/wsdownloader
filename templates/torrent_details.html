@@ -79,29 +79,54 @@
       </div>
 
       {% if s.get('files') %}
+        {% set file_list = s.get('files') %}
+        {% set has_multi = file_list|length > 1 %}
         <div class="card mb-4">
           <div class="card-body">
-            <h2 class="h5 mb-3">Soubory ({{ s.get('files')|length }})</h2>
-            <div class="table-responsive">
-              <table class="table table-sm mb-0">
-                <thead><tr>
-                  <th>Cesta</th><th class="text-end">Velikost</th>
-                  <th class="text-end">Staženo</th><th class="text-end">%</th>
-                </tr></thead>
-                <tbody>
-                  {% for f in s.get('files') %}
-                    {% set fl = (f.get('length') or 0) | int %}
-                    {% set fc = (f.get('completedLength') or 0) | int %}
-                    <tr>
-                      <td class="text-break mono">{{ f.get('path', '—') }}</td>
-                      <td class="text-end">{{ fl | human_size }}</td>
-                      <td class="text-end">{{ fc | human_size }}</td>
-                      <td class="text-end">{% if fl %}{{ '%.1f'|format(fc * 100 / fl) }}{% else %}—{% endif %}</td>
-                    </tr>
-                  {% endfor %}
-                </tbody>
-              </table>
-            </div>
+            <h2 class="h5 mb-3">Soubory ({{ file_list|length }})</h2>
+            {% if has_multi %}
+              <p class="small text-muted mb-2">
+                Označ soubory, které chceš stáhnout. Odznačené aria2 nestaáhne (nebo je zastaví, pokud ještě nejsou hotové).
+              </p>
+            {% endif %}
+            <form method="post" action="{{ url_for('select_torrent_files') }}">
+              <input type="hidden" name="url" value="{{ link.url }}">
+              <div class="table-responsive">
+                <table class="table table-sm mb-0">
+                  <thead><tr>
+                    {% if has_multi %}<th style="width: 2.5rem;">Stáhnout</th>{% endif %}
+                    <th>Cesta</th><th class="text-end">Velikost</th>
+                    <th class="text-end">Staženo</th><th class="text-end">%</th>
+                  </tr></thead>
+                  <tbody>
+                    {% for f in file_list %}
+                      {% set fl = (f.get('length') or 0) | int %}
+                      {% set fc = (f.get('completedLength') or 0) | int %}
+                      {% set idx = (f.get('index') or loop.index) | int %}
+                      {% set selected = (f.get('selected', 'true')|string|lower) != 'false' %}
+                      <tr>
+                        {% if has_multi %}
+                          <td>
+                            <input class="form-check-input" type="checkbox"
+                                   name="file_index" value="{{ idx }}"
+                                   {% if selected %}checked{% endif %}>
+                          </td>
+                        {% endif %}
+                        <td class="text-break mono">{{ f.get('path', '—') }}</td>
+                        <td class="text-end">{{ fl | human_size }}</td>
+                        <td class="text-end">{{ fc | human_size }}</td>
+                        <td class="text-end">{% if fl %}{{ '%.1f'|format(fc * 100 / fl) }}{% else %}—{% endif %}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+              {% if has_multi %}
+                <div class="mt-2">
+                  <button type="submit" class="btn btn-sm btn-primary">Uložit výběr</button>
+                </div>
+              {% endif %}
+            </form>
           </div>
         </div>
       {% endif %}
