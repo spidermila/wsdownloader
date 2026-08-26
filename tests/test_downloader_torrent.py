@@ -288,6 +288,29 @@ def test_enqueue_torrent_file(downloader_module, monkeypatch):
     gid = downloader_module._enqueue_torrent(row, client, {})
     assert gid == 'gid-torrent'
     assert client.calls[0][0] == 'add_torrent'
+    # Staged file lives under TORRENTS_DIR, not DOWNLOADS_PATH.
+    staged = downloader_module._torrent_file_path(row['id'])
+    assert staged.exists()
+    assert staged.parent == downloader_module.TORRENTS_DIR
+    assert staged.read_bytes() == b'torrent-bytes'
+    assert not any(downloader_module.DOWNLOADS_PATH.glob('*.torrent'))
+
+
+def test_enqueue_torrent_file_uses_cached_bytes(
+    downloader_module, monkeypatch,
+):
+    _seed_torrent_row(downloader_module, TORRENT_URL, 'torrent')
+    row = downloader_module.fetch_active_torrents()[0]
+    downloader_module._torrent_file_path(row['id']).write_bytes(b'cached')
+
+    def _boom(url):
+        raise AssertionError('should not refetch when cached')
+
+    monkeypatch.setattr(downloader_module, '_fetch_torrent_bytes', _boom)
+    client = FakeClient()
+    gid = downloader_module._enqueue_torrent(row, client, {})
+    assert gid == 'gid-torrent'
+    assert client.calls[0] == ('add_torrent', b'cached', {})
 
 
 def test_enqueue_torrent_file_download_failure(
@@ -378,11 +401,44 @@ def test_torrent_loop_marks_failed_when_enqueue_fails(
     conn = sqlite3.connect(downloader_module.DB_PATH)
     try:
         row = conn.execute(
-            'SELECT status FROM links WHERE url = ?', (TORRENT_URL,),
+            'SELECT id, status FROM links WHERE url = ?', (TORRENT_URL,),
         ).fetchone()
     finally:
         conn.close()
-    assert row[0] == 'failed'
+    assert row[1] == 'failed'
+    assert not downloader_module._torrent_file_path(row[0]).exists()
+
+
+def test_torrent_loop_retries_space_waiting_row_after_recovery(
+    downloader_module, monkeypatch,
+):
+    """Once free space recovers, a row previously parked as space_waiting
+    must be reconsidered and enqueued."""
+    _seed_torrent_row(
+        downloader_module, MAGNET, 'magnet', status='space_waiting',
+    )
+    _enable_torrents_in_db(downloader_module)
+
+    monkeypatch.setattr(
+        downloader_module, 'get_fs_usage', lambda: {'percent_free': 50.0},
+    )
+    client = FakeClient()
+    monkeypatch.setattr(
+        downloader_module.torrent, 'Aria2Client', lambda *a, **kw: client,
+    )
+
+    downloader_module.torrent_loop()
+
+    assert any(c[0] == 'add_uri' for c in client.calls)
+    conn = sqlite3.connect(downloader_module.DB_PATH)
+    try:
+        row = conn.execute(
+            'SELECT status, external_id FROM links WHERE url = ?', (MAGNET,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == 'downloading'
+    assert row[1] == 'gid-uri'
 
 
 def test_torrent_loop_polls_active_gid(downloader_module, monkeypatch):
@@ -437,6 +493,17 @@ def test_torrent_loop_removes_completed_row(downloader_module, monkeypatch):
         downloader_module.torrent, 'Aria2Client', lambda *a, **kw: client,
     )
 
+    # Stage a fake .torrent file to prove it gets cleaned up.
+    conn = sqlite3.connect(downloader_module.DB_PATH)
+    try:
+        row_id = conn.execute(
+            'SELECT id FROM links WHERE url = ?', (MAGNET,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    staged = downloader_module._torrent_file_path(row_id)
+    staged.write_bytes(b'stub')
+
     downloader_module.torrent_loop()
 
     conn = sqlite3.connect(downloader_module.DB_PATH)
@@ -448,6 +515,7 @@ def test_torrent_loop_removes_completed_row(downloader_module, monkeypatch):
         conn.close()
     assert row is None
     assert ('remove_download_result', 'gidX') in client.calls
+    assert not staged.exists()
 
 
 def test_torrent_loop_keeps_row_while_seeding(downloader_module, monkeypatch):
@@ -505,7 +573,18 @@ def test_torrent_loop_logs_error_on_aria_error_state(
         downloader_module.torrent, 'Aria2Client', lambda *a, **kw: client,
     )
 
+    conn = sqlite3.connect(downloader_module.DB_PATH)
+    try:
+        row_id = conn.execute(
+            'SELECT id FROM links WHERE url = ?', (MAGNET,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    staged = downloader_module._torrent_file_path(row_id)
+    staged.write_bytes(b'stub')
+
     downloader_module.torrent_loop()
+    assert not staged.exists()
 
     conn = sqlite3.connect(downloader_module.DB_PATH)
     try:

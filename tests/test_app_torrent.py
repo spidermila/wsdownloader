@@ -156,6 +156,9 @@ def test_delete_link_calls_aria2_for_torrent(app_module, client, monkeypatch):
         )
         db.commit()
 
+    staged = app_module.TORRENTS_DIR / f'link-{row_id}.torrent'
+    staged.write_bytes(b'stub')
+
     calls = []
 
     class FakeClient:
@@ -174,6 +177,7 @@ def test_delete_link_calls_aria2_for_torrent(app_module, client, monkeypatch):
     assert calls == [
         ('remove', 'gid42'), ('remove_download_result', 'gid42'),
     ]
+    assert not staged.exists()
 
 
 def test_delete_link_preserves_row_on_aria2_error(

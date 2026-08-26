@@ -124,7 +124,7 @@
                       <td>{{ p.get('port', '—') }}</td>
                       <td class="text-end">{{ (p.get('downloadSpeed') or 0) | int | human_speed or '—' }}</td>
                       <td class="text-end">{{ (p.get('uploadSpeed') or 0) | int | human_speed or '—' }}</td>
-                      <td class="text-end">{% if p.get('bitfield') %}{{ p.get('bitfield')|length }} b{% else %}—{% endif %}</td>
+                      <td class="text-end">{% if p.get('bitfield') %}{{ p.get('bitfield')|length }} hex{% else %}—{% endif %}</td>
                       <td>{{ p.get('seeder', '—') }}</td>
                       <td class="mono small">
                         {% if p.get('amChoking') == 'true' %}amChoking {% endif %}
