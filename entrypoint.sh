@@ -59,7 +59,7 @@ start_aria2() {
     --save-session="${DATA_DIR:-/data}/aria2.session" \
     --save-session-interval=30 \
     --input-file="${DATA_DIR:-/data}/aria2.session" \
-    --bt-save-metadata=true \
+    --bt-save-metadata=false \
     --rpc-save-upload-metadata=false \
     --enable-dht="${ARIA2_ENABLE_DHT}" \
     --enable-peer-exchange=true \
