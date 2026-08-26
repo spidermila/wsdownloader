@@ -103,7 +103,7 @@
                       {% set fl = (f.get('length') or 0) | int %}
                       {% set fc = (f.get('completedLength') or 0) | int %}
                       {% set idx = (f.get('index') or loop.index) | int %}
-                      {% set selected = (f.get('selected', 'true')|string|lower) != 'false' %}
+                      {% set selected = (f.get('selected', 'true')|string|lower) == 'true' %}
                       <tr>
                         {% if has_multi %}
                           <td>

@@ -298,12 +298,23 @@ def test_map_status_transitions(torrent_module):
 
 def test_parse_select_file_indices_filters_and_sorts(torrent_module):
     assert torrent_module.parse_select_file_indices(
-        ['3', '1', '2', '2', '99', 'x', '', '0', '-1'], file_count=5,
+        ['3', '1', '2', '2', '99', 'x', '', '0', '-1'],
+        allowed_indices={1, 2, 3, 4, 5},
     ) == [1, 2, 3]
 
 
+def test_parse_select_file_indices_respects_sparse_allowed_set(
+    torrent_module,
+):
+    assert torrent_module.parse_select_file_indices(
+        ['1', '2', '3'], allowed_indices={1, 3, 5},
+    ) == [1, 3]
+
+
 def test_parse_select_file_indices_empty(torrent_module):
-    assert torrent_module.parse_select_file_indices([], file_count=5) == []
+    assert torrent_module.parse_select_file_indices(
+        [], allowed_indices={1, 2, 3},
+    ) == []
 
 
 def test_global_limit_options(torrent_module):
