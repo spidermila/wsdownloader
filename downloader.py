@@ -841,12 +841,18 @@ def _enqueue_torrent(
 ) -> Optional[str]:
     kind = row['kind']
     url = row['url']
-    if kind == torrent.KIND_MAGNET:
-        return client.add_uri(url, options)
-    payload = _fetch_torrent_bytes(url)
-    if payload is None:
+    try:
+        if kind == torrent.KIND_MAGNET:
+            return client.add_uri(url, options)
+        payload = _fetch_torrent_bytes(url)
+        if payload is None:
+            return None
+        return client.add_torrent(payload, options)
+    except torrent.Aria2Error as exc:
+        logger.error(
+            '_enqueue_torrent() RPC error for %s: %s', url, exc,
+        )
         return None
-    return client.add_torrent(payload, options)
 
 
 def _try_remove_result(client: 'torrent.Aria2Client', gid: str) -> None:
@@ -864,9 +870,16 @@ def _apply_torrent_status(
 ) -> None:
     row_id = row['id']
     aria_status = status.get('status', '')
+    raw_seeder = status.get('seeder')
+    if isinstance(raw_seeder, str):
+        runtime_seeder = raw_seeder.lower() == 'true'
+    else:
+        runtime_seeder = bool(raw_seeder)
 
     # Row about to be deleted — skip progress writes.
-    if aria_status == 'complete' and not seeding_enabled:
+    if aria_status == 'complete' and (
+        not seeding_enabled or not runtime_seeder
+    ):
         _try_remove_result(client, row['external_id'] or '')
         delete_by_id(row_id)
         return
@@ -933,6 +946,13 @@ def torrent_loop() -> None:
     for row in fetch_active_torrents():
         if not row['external_id']:
             if row['status'] == 'paused':
+                continue
+            fs_usage = get_fs_usage()
+            if fs_usage['percent_free'] < 5:
+                set_status_downloaded_by_id(
+                    row_id=row['id'],
+                    new_status='space_waiting',
+                )
                 continue
             gid = _enqueue_torrent(row, client, options)
             if gid is None:

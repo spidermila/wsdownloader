@@ -6,7 +6,10 @@ import pytest
 import requests
 
 
-MAGNET = 'magnet:?xt=urn:btih:0123456789abcdef&dn=example'
+MAGNET = (
+    'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567'
+    '&dn=example'
+)
 TORRENT_URL = 'https://example.com/x.torrent'
 
 
@@ -465,7 +468,7 @@ def test_torrent_loop_keeps_row_while_seeding(downloader_module, monkeypatch):
     client = FakeClient()
     client.status_response = {
         'status': 'complete', 'totalLength': '10', 'completedLength': '10',
-        'downloadSpeed': '0',
+        'downloadSpeed': '0', 'seeder': 'true',
     }
     monkeypatch.setattr(
         downloader_module.torrent, 'Aria2Client', lambda *a, **kw: client,
@@ -602,8 +605,6 @@ def test_apply_status_error_state_ignores_remove_failure(
     _enable_torrents_in_db(downloader_module)
 
     class Client:
-        calls = []
-
         def tell_status(self, gid):
             return {
                 'status': 'error', 'totalLength': '0',
@@ -612,7 +613,6 @@ def test_apply_status_error_state_ignores_remove_failure(
             }
 
         def remove_download_result(self, gid):
-            self.calls.append(gid)
             raise downloader_module.torrent.Aria2Error('removal failed')
 
         def is_available(self):

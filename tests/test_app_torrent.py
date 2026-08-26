@@ -1,7 +1,10 @@
 """Tests for the torrent code paths in app.py (issue #39)."""
 
 
-MAGNET = 'magnet:?xt=urn:btih:0123456789abcdef&dn=example'
+MAGNET = (
+    'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567'
+    '&dn=example'
+)
 
 
 def _enable_torrents(app_module):
@@ -47,7 +50,7 @@ def test_validate_url_accepts_dot_torrent_when_enabled(app_module):
 
 def test_add_link_with_kind_persists(app_module):
     with app_module.app.app_context():
-        added, url, row_id = app_module.add_link_if_new(
+        added, _url, row_id = app_module.add_link_if_new(
             MAGNET, kind=app_module.torrent.KIND_MAGNET,
         )
         assert added and row_id is not None
@@ -173,7 +176,9 @@ def test_delete_link_calls_aria2_for_torrent(app_module, client, monkeypatch):
     ]
 
 
-def test_delete_link_swallows_aria2_error(app_module, client, monkeypatch):
+def test_delete_link_preserves_row_on_aria2_error(
+    app_module, client, monkeypatch,
+):
     _enable_torrents(app_module)
     with app_module.app.app_context():
         _, _, row_id = app_module.add_link_if_new(
@@ -199,6 +204,12 @@ def test_delete_link_swallows_aria2_error(app_module, client, monkeypatch):
     monkeypatch.setattr(app_module.torrent, 'Aria2Client', FakeClient)
     resp = client.post('/delete', data={'url': MAGNET})
     assert resp.status_code == 302
+    with app_module.app.app_context():
+        db = app_module.get_db()
+        row = db.execute(
+            'SELECT id FROM links WHERE url = ?', (MAGNET,),
+        ).fetchone()
+        assert row is not None
 
 
 def test_delete_link_skips_aria2_for_http(app_module, client, monkeypatch):
