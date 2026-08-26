@@ -217,15 +217,17 @@ def apply_global_limits(
         return False
 
 
-def parse_select_file_indices(raw: list[str], file_count: int) -> list[int]:
-    """Return sorted, deduped 1-based file indices in [1, file_count].
-    Invalid entries are dropped."""
+def parse_select_file_indices(
+    raw: list[str], allowed_indices: set[int],
+) -> list[int]:
+    """Return sorted, deduped file indices that are also in allowed_indices.
+    Invalid or unknown entries are dropped."""
     result: set[int] = set()
     for item in raw or []:
         try:
             idx = int(item)
         except (TypeError, ValueError):
             continue
-        if 1 <= idx <= file_count:
+        if idx in allowed_indices:
             result.add(idx)
     return sorted(result)

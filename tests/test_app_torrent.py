@@ -681,6 +681,36 @@ def test_remove_prefers_graceful_over_force(app_module, client, monkeypatch):
     assert ('force_remove', 'gidA') not in calls
 
 
+def test_remove_returns_false_when_both_graceful_and_force_fail(
+    app_module, client, monkeypatch,
+):
+    _enable_torrents(app_module)
+    _make_torrent_row(app_module)
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def remove(self, gid):
+            raise app_module.torrent.Aria2Error('busy')
+
+        def force_remove(self, gid):
+            raise app_module.torrent.Aria2Error('still busy')
+
+        def remove_download_result(self, gid):
+            raise AssertionError('should not be called')
+
+    monkeypatch.setattr(app_module.torrent, 'Aria2Client', FakeClient)
+    resp = client.post('/delete', data={'url': MAGNET})
+    assert resp.status_code == 302
+    with app_module.app.app_context():
+        db = app_module.get_db()
+        row = db.execute(
+            'SELECT id FROM links WHERE url = ?', (MAGNET,),
+        ).fetchone()
+    assert row is not None
+
+
 def test_remove_falls_back_to_force_when_graceful_fails(
     app_module, client, monkeypatch,
 ):
@@ -717,7 +747,9 @@ def test_pause_all_updates_all_downloading_rows(
     _enable_torrents(app_module)
     _make_torrent_row(app_module, url=MAGNET, external_id='g1')
     other = MAGNET.replace('0123456789abcdef' * 2, 'a' * 32)
-    _make_torrent_row(app_module, url=other, external_id='g2')
+    _make_torrent_row(
+        app_module, url=other, external_id='g2', status='seeding',
+    )
 
     seen = []
 
@@ -737,7 +769,34 @@ def test_pause_all_updates_all_downloading_rows(
         rows = db.execute(
             "SELECT status FROM links WHERE kind = 'magnet'",
         ).fetchall()
+    # Covers reviewer finding: bulk pause must also flip 'seeding' rows,
+    # not just 'downloading'.
     assert all(r['status'] == 'paused' for r in rows)
+
+
+def test_pause_all_preserves_terminal_statuses(
+    app_module, client, monkeypatch,
+):
+    _enable_torrents(app_module)
+    _make_torrent_row(
+        app_module, url=MAGNET, external_id='g1', status='failed',
+    )
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def pause_all(self):
+            pass
+
+    monkeypatch.setattr(app_module.torrent, 'Aria2Client', FakeClient)
+    client.post('/torrent/pause-all')
+    with app_module.app.app_context():
+        db = app_module.get_db()
+        row = db.execute(
+            'SELECT status FROM links WHERE url = ?', (MAGNET,),
+        ).fetchone()
+    assert row['status'] == 'failed'
 
 
 def test_resume_all_updates_paused_rows(app_module, client, monkeypatch):

@@ -25,20 +25,23 @@ touch "${DATA_DIR:-/data}/aria2.session"
 # table; read once at startup and passed to aria2. Runtime changes are pushed
 # via aria2.changeGlobalOption by app.py.
 eval "$(python - <<'PY'
-import os, sqlite3
+import os, sqlite3, sys
 db = os.environ.get('DB_PATH') or f"{os.environ.get('DATA_DIR', '/data')}/downloader.db"
 dl = ul = 0
 try:
     c = sqlite3.connect(db)
-    r = c.execute(
-        'SELECT torrent_max_dl_bps, torrent_max_ul_bps '
-        'FROM settings WHERE id = 1'
-    ).fetchone()
-    if r:
-        dl, ul = int(r[0] or 0), int(r[1] or 0)
-    c.close()
-except Exception:
-    pass
+    try:
+        r = c.execute(
+            'SELECT torrent_max_dl_bps, torrent_max_ul_bps '
+            'FROM settings WHERE id = 1'
+        ).fetchone()
+        if r:
+            dl, ul = int(r[0] or 0), int(r[1] or 0)
+    finally:
+        c.close()
+except sqlite3.Error as exc:
+    print(f'WARN: could not read torrent speed limits from {db}: {exc}',
+          file=sys.stderr)
 print(f'ARIA2_MAX_DL_BPS={dl}; ARIA2_MAX_UL_BPS={ul}')
 PY
 )"

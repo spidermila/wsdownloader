@@ -1398,13 +1398,9 @@ def _parse_speed_limit_kib(raw: str | None) -> int:
 
 
 def _push_global_limits(dl_bps: int, ul_bps: int) -> None:
-    """Best-effort: push new global limits to aria2 if it's running."""
-    try:
-        client = torrent.Aria2Client()
-        if client.is_available():
-            torrent.apply_global_limits(client, dl_bps, ul_bps)
-    except torrent.Aria2Error as exc:
-        logger.warning('_push_global_limits() Aria2 error: %s', exc)
+    """Best-effort: push new global limits to aria2. Logs and swallows
+    errors so the settings save always succeeds even if aria2 is down."""
+    torrent.apply_global_limits(torrent.Aria2Client(), dl_bps, ul_bps)
 
 
 @app.post('/settings/torrent')
@@ -1443,9 +1439,14 @@ def update_torrent_settings():
     return redirect(url_for('index'))
 
 
+# Statuses we must not overwrite in bulk actions (terminal or user-driven).
+_BULK_PROTECTED_STATUSES = ('failed', 'connection_failed', 'space_waiting')
+
+
 def _bulk_torrent_action(action: str) -> tuple[str, str]:
-    """Run a bulk pause/resume across all torrent rows.
-    Returns (flash_message, category)."""
+    """Run a bulk pause/resume across all live torrent rows.
+    Returns (flash_message, category). The downloader loop will reconcile
+    the status against aria2's tellStatus on the next tick."""
     if action not in ('pause', 'resume'):
         return ('Neplatná akce.', 'error')
     try:
@@ -1460,13 +1461,14 @@ def _bulk_torrent_action(action: str) -> tuple[str, str]:
         logger.warning('_bulk_torrent_action() Aria2 error: %s', exc)
         return ('Nepodařilo se provést akci v aria2.', 'error')
 
+    placeholders = ','.join('?' * len(_BULK_PROTECTED_STATUSES))
     db = get_db()
-    src_status = 'downloading' if action == 'pause' else 'paused'
     db.execute(
         'UPDATE links SET status = ? '
         "WHERE kind IN ('magnet', 'torrent') "
-        'AND external_id IS NOT NULL AND status = ?',
-        (new_status, src_status),
+        'AND external_id IS NOT NULL '
+        f'AND status NOT IN ({placeholders})',
+        (new_status, *_BULK_PROTECTED_STATUSES),
     )
     db.commit()
     msg = (
@@ -1532,8 +1534,14 @@ def select_torrent_files():
     if not files:
         flash('Nelze načíst seznam souborů torrentu.', 'error')
         return redirect(url_for('torrent_details', url=url))
+    allowed: set[int] = set()
+    for pos, f in enumerate(files, start=1):
+        try:
+            allowed.add(int(f.get('index') or pos))
+        except (TypeError, ValueError):
+            allowed.add(pos)
     indices = torrent.parse_select_file_indices(
-        request.form.getlist('file_index'), len(files),
+        request.form.getlist('file_index'), allowed,
     )
     if not indices:
         flash('Vyber alespoň jeden soubor.', 'error')
