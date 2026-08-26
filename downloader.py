@@ -99,8 +99,7 @@ def fetch_oldest() -> Optional[sqlite3.Row]:
             SELECT id, url, created_at, status, pct_downloaded,
                    size_bytes, kind, external_id
              FROM links
-             WHERE status NOT IN
-                   ('connection_failed', 'failed', 'space_waiting')
+             WHERE status NOT IN ('connection_failed', 'failed')
                AND (kind IS NULL OR kind = 'http')
              ORDER BY created_at ASC LIMIT 1
         """).fetchone()
