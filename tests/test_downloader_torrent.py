@@ -39,6 +39,27 @@ def test_fetch_oldest_skips_torrents(downloader_module):
     assert row['url'] == 'https://example.com/a.mp4'
 
 
+def test_fetch_oldest_returns_space_waiting_rows(downloader_module):
+    """space_waiting rows must remain visible so main_loop() can retry
+    them once free space recovers."""
+    url = 'https://example.com/a.mp4'
+    downloader_module.add_link_if_new(url)
+    conn = sqlite3.connect(downloader_module.DB_PATH)
+    try:
+        conn.execute(
+            'UPDATE links SET status = ? WHERE url = ?',
+            ('space_waiting', url),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    row = downloader_module.fetch_oldest()
+    assert row is not None
+    assert row['url'] == url
+    assert row['status'] == 'space_waiting'
+
+
 def test_fetch_active_torrents_only_returns_torrent_kinds(downloader_module):
     _seed_torrent_row(downloader_module, MAGNET, 'magnet')
     _seed_torrent_row(downloader_module, TORRENT_URL, 'torrent')
