@@ -197,7 +197,9 @@ def init_db() -> None:
                 dark_mode INTEGER NOT NULL DEFAULT 0,
                 torrent_enabled INTEGER NOT NULL DEFAULT 0,
                 torrent_seed_mode TEXT NOT NULL DEFAULT 'off',
-                torrent_seed_value REAL NOT NULL DEFAULT 0
+                torrent_seed_value REAL NOT NULL DEFAULT 0,
+                torrent_max_dl_bps INTEGER NOT NULL DEFAULT 0,
+                torrent_max_ul_bps INTEGER NOT NULL DEFAULT 0
             )
         """)
         conn.execute('INSERT OR IGNORE INTO settings (id) VALUES (1)')
@@ -236,6 +238,16 @@ def init_db() -> None:
         if 'torrent_seed_value' not in columns:
             conn.execute(
                 'ALTER TABLE settings ADD COLUMN torrent_seed_value REAL '
+                'NOT NULL DEFAULT 0',
+            )
+        if 'torrent_max_dl_bps' not in columns:
+            conn.execute(
+                'ALTER TABLE settings ADD COLUMN torrent_max_dl_bps INTEGER '
+                'NOT NULL DEFAULT 0',
+            )
+        if 'torrent_max_ul_bps' not in columns:
+            conn.execute(
+                'ALTER TABLE settings ADD COLUMN torrent_max_ul_bps INTEGER '
                 'NOT NULL DEFAULT 0',
             )
 
@@ -281,7 +293,8 @@ def get_settings() -> dict:
     db = get_db()
     row = db.execute("""
         SELECT id, token, auto_download, user_name, password_hash, dark_mode,
-               torrent_enabled, torrent_seed_mode, torrent_seed_value
+               torrent_enabled, torrent_seed_mode, torrent_seed_value,
+               torrent_max_dl_bps, torrent_max_ul_bps
         FROM settings WHERE id = 1
     """).fetchone()
     if not row:
@@ -295,6 +308,8 @@ def get_settings() -> dict:
             'torrent_enabled': 0,
             'torrent_seed_mode': 'off',
             'torrent_seed_value': 0,
+            'torrent_max_dl_bps': 0,
+            'torrent_max_ul_bps': 0,
         }
     return dict(row)
 
@@ -1024,19 +1039,32 @@ def logout():
 
 
 def _remove_from_aria2(external_id: str) -> bool:
+    """Graceful remove first (announces stop to tracker), fall back to force.
+    Always follows up with removeDownloadResult to purge the row from aria2.
+    """
     if not external_id:
         return True
+    client = torrent.Aria2Client()
     try:
-        client = torrent.Aria2Client()
         client.remove(external_id)
-        client.remove_download_result(external_id)
-        return True
     except torrent.Aria2Error as exc:
-        logger.warning(
-            '_remove_from_aria2() Failed to remove GID %s: %s',
-            external_id, exc,
+        logger.info(
+            '_remove_from_aria2() Graceful remove of %s failed (%s); '
+            'trying forceRemove.', external_id, exc,
         )
-        return False
+        try:
+            client.force_remove(external_id)
+        except torrent.Aria2Error as exc2:
+            logger.warning(
+                '_remove_from_aria2() Force remove of %s failed: %s',
+                external_id, exc2,
+            )
+            return False
+    try:
+        client.remove_download_result(external_id)
+    except torrent.Aria2Error:
+        pass
+    return True
 
 
 def _delete_staged_torrent_file(row_id: int) -> None:
@@ -1358,6 +1386,27 @@ def stop_seeding_torrent():
     return redirect(url_for('index'))
 
 
+def _parse_speed_limit_kib(raw: str | None) -> int:
+    """Parse a KiB/s input (blank/negative/invalid → 0) and return bytes/s."""
+    try:
+        kib = float((raw or '').strip() or 0)
+    except ValueError:
+        return 0
+    if kib <= 0:
+        return 0
+    return int(kib * 1024)
+
+
+def _push_global_limits(dl_bps: int, ul_bps: int) -> None:
+    """Best-effort: push new global limits to aria2 if it's running."""
+    try:
+        client = torrent.Aria2Client()
+        if client.is_available():
+            torrent.apply_global_limits(client, dl_bps, ul_bps)
+    except torrent.Aria2Error as exc:
+        logger.warning('_push_global_limits() Aria2 error: %s', exc)
+
+
 @app.post('/settings/torrent')
 def update_torrent_settings():
     enabled = 1 if request.form.get('torrent_enabled') else 0
@@ -1370,23 +1419,137 @@ def update_torrent_settings():
         seed_value = 0.0
     if seed_value < 0:
         seed_value = 0.0
+    dl_bps = _parse_speed_limit_kib(request.form.get('torrent_max_dl_kib'))
+    ul_bps = _parse_speed_limit_kib(request.form.get('torrent_max_ul_kib'))
 
     db = get_db()
     db.execute(
         'UPDATE settings SET torrent_enabled = ?, torrent_seed_mode = ?, '
-        'torrent_seed_value = ? WHERE id = 1',
-        (enabled, seed_mode, seed_value),
+        'torrent_seed_value = ?, torrent_max_dl_bps = ?, '
+        'torrent_max_ul_bps = ? WHERE id = 1',
+        (enabled, seed_mode, seed_value, dl_bps, ul_bps),
     )
     db.commit()
     logger.info(
         'update_torrent_settings() torrent_enabled=%d seed_mode=%s '
-        'seed_value=%s', enabled, seed_mode, seed_value,
+        'seed_value=%s dl_bps=%d ul_bps=%d',
+        enabled, seed_mode, seed_value, dl_bps, ul_bps,
     )
+    _push_global_limits(dl_bps, ul_bps)
     flash(
         f'Torrenty {"zapnuty" if enabled else "vypnuty"}.',
         'success',
     )
     return redirect(url_for('index'))
+
+
+def _bulk_torrent_action(action: str) -> tuple[str, str]:
+    """Run a bulk pause/resume across all torrent rows.
+    Returns (flash_message, category)."""
+    if action not in ('pause', 'resume'):
+        return ('Neplatná akce.', 'error')
+    try:
+        client = torrent.Aria2Client()
+        if action == 'pause':
+            client.pause_all()
+            new_status = 'paused'
+        else:
+            client.unpause_all()
+            new_status = 'downloading'
+    except torrent.Aria2Error as exc:
+        logger.warning('_bulk_torrent_action() Aria2 error: %s', exc)
+        return ('Nepodařilo se provést akci v aria2.', 'error')
+
+    db = get_db()
+    src_status = 'downloading' if action == 'pause' else 'paused'
+    db.execute(
+        'UPDATE links SET status = ? '
+        "WHERE kind IN ('magnet', 'torrent') "
+        'AND external_id IS NOT NULL AND status = ?',
+        (new_status, src_status),
+    )
+    db.commit()
+    msg = (
+        'Všechny torrenty pozastaveny.' if action == 'pause'
+        else 'Všechny torrenty obnoveny.'
+    )
+    return (msg, 'success')
+
+
+@app.post('/torrent/pause-all')
+def pause_all_torrents():
+    msg, cat = _bulk_torrent_action('pause')
+    flash(msg, cat)
+    return redirect(url_for('index'))
+
+
+@app.post('/torrent/resume-all')
+def resume_all_torrents():
+    msg, cat = _bulk_torrent_action('resume')
+    flash(msg, cat)
+    return redirect(url_for('index'))
+
+
+@app.get('/torrent/global-stats')
+def torrent_global_stats():
+    try:
+        client = torrent.Aria2Client()
+        stat = client.get_global_stat()
+    except torrent.Aria2Error as exc:
+        return jsonify({'available': False, 'error': str(exc)}), 200
+    return jsonify({
+        'available': True,
+        'download_speed_bps': int(stat.get('downloadSpeed') or 0),
+        'upload_speed_bps': int(stat.get('uploadSpeed') or 0),
+        'num_active': int(stat.get('numActive') or 0),
+        'num_waiting': int(stat.get('numWaiting') or 0),
+        'num_stopped': int(stat.get('numStopped') or 0),
+    })
+
+
+def _torrent_status_files(external_id: str) -> list[dict]:
+    """Fetch just the file list for a torrent GID, or [] on failure."""
+    if not external_id:
+        return []
+    try:
+        client = torrent.Aria2Client()
+        status = client.tell_status(external_id, keys=['files'])
+    except torrent.Aria2Error as exc:
+        logger.warning('_torrent_status_files() Aria2 error: %s', exc)
+        return []
+    return list(status.get('files') or [])
+
+
+@app.post('/torrent/select-files')
+def select_torrent_files():
+    url = (request.form.get('url') or '').strip()
+    row = _torrent_row_by_url(url) if url else None
+    if row is None or row['kind'] == torrent.KIND_HTTP or \
+            not row['external_id']:
+        flash('Torrent nemá zatím k dispozici seznam souborů.', 'error')
+        return redirect(url_for('index'))
+    files = _torrent_status_files(row['external_id'])
+    if not files:
+        flash('Nelze načíst seznam souborů torrentu.', 'error')
+        return redirect(url_for('torrent_details', url=url))
+    indices = torrent.parse_select_file_indices(
+        request.form.getlist('file_index'), len(files),
+    )
+    if not indices:
+        flash('Vyber alespoň jeden soubor.', 'error')
+        return redirect(url_for('torrent_details', url=url))
+    try:
+        torrent.Aria2Client().change_option(
+            row['external_id'], {'select-file': ','.join(map(str, indices))},
+        )
+    except torrent.Aria2Error as exc:
+        logger.warning('select_torrent_files() Aria2 error: %s', exc)
+        flash('Nepodařilo se uložit výběr souborů.', 'error')
+        return redirect(url_for('torrent_details', url=url))
+    flash(
+        f'Výběr uložen ({len(indices)} z {len(files)} souborů).', 'success',
+    )
+    return redirect(url_for('torrent_details', url=url))
 
 
 @app.post('/settings/dark-mode')

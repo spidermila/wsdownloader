@@ -202,6 +202,9 @@ def test_delete_link_preserves_row_on_aria2_error(
         def remove(self, gid):
             raise app_module.torrent.Aria2Error('boom')
 
+        def force_remove(self, gid):
+            raise app_module.torrent.Aria2Error('boom')
+
         def remove_download_result(self, gid):
             raise app_module.torrent.Aria2Error('boom')
 
@@ -648,3 +651,254 @@ def test_dir_size_survives_os_error(app_module):
             return iter([BrokenFile(), OkFile()])
 
     assert app_module._dir_size(FakePath()) == 42
+
+
+# --- New tests for graceful remove, bulk actions, global limits, files ------
+
+def test_remove_prefers_graceful_over_force(app_module, client, monkeypatch):
+    _enable_torrents(app_module)
+    _make_torrent_row(app_module)
+
+    calls = []
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def remove(self, gid):
+            calls.append(('remove', gid))
+
+        def force_remove(self, gid):
+            calls.append(('force_remove', gid))
+
+        def remove_download_result(self, gid):
+            calls.append(('remove_result', gid))
+
+    monkeypatch.setattr(app_module.torrent, 'Aria2Client', FakeClient)
+    resp = client.post('/delete', data={'url': MAGNET})
+    assert resp.status_code == 302
+    assert ('remove', 'gidA') in calls
+    assert ('force_remove', 'gidA') not in calls
+
+
+def test_remove_falls_back_to_force_when_graceful_fails(
+    app_module, client, monkeypatch,
+):
+    _enable_torrents(app_module)
+    _make_torrent_row(app_module)
+
+    calls = []
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def remove(self, gid):
+            calls.append(('remove', gid))
+            raise app_module.torrent.Aria2Error('busy')
+
+        def force_remove(self, gid):
+            calls.append(('force_remove', gid))
+
+        def remove_download_result(self, gid):
+            calls.append(('remove_result', gid))
+
+    monkeypatch.setattr(app_module.torrent, 'Aria2Client', FakeClient)
+    resp = client.post('/delete', data={'url': MAGNET})
+    assert resp.status_code == 302
+    assert [c[0] for c in calls] == [
+        'remove', 'force_remove', 'remove_result',
+    ]
+
+
+def test_pause_all_updates_all_downloading_rows(
+    app_module, client, monkeypatch,
+):
+    _enable_torrents(app_module)
+    _make_torrent_row(app_module, url=MAGNET, external_id='g1')
+    other = MAGNET.replace('0123456789abcdef' * 2, 'a' * 32)
+    _make_torrent_row(app_module, url=other, external_id='g2')
+
+    seen = []
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def pause_all(self):
+            seen.append('pause_all')
+
+    monkeypatch.setattr(app_module.torrent, 'Aria2Client', FakeClient)
+    resp = client.post('/torrent/pause-all')
+    assert resp.status_code == 302
+    assert seen == ['pause_all']
+    with app_module.app.app_context():
+        db = app_module.get_db()
+        rows = db.execute(
+            "SELECT status FROM links WHERE kind = 'magnet'",
+        ).fetchall()
+    assert all(r['status'] == 'paused' for r in rows)
+
+
+def test_resume_all_updates_paused_rows(app_module, client, monkeypatch):
+    _enable_torrents(app_module)
+    _make_torrent_row(
+        app_module, url=MAGNET, external_id='g1', status='paused',
+    )
+    seen = []
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def unpause_all(self):
+            seen.append('unpause_all')
+
+    monkeypatch.setattr(app_module.torrent, 'Aria2Client', FakeClient)
+    resp = client.post('/torrent/resume-all')
+    assert resp.status_code == 302
+    assert seen == ['unpause_all']
+    with app_module.app.app_context():
+        db = app_module.get_db()
+        row = db.execute(
+            'SELECT status FROM links WHERE url = ?', (MAGNET,),
+        ).fetchone()
+    assert row['status'] == 'downloading'
+
+
+def test_settings_persists_speed_limits_and_pushes_to_aria2(
+    app_module, client, monkeypatch,
+):
+    pushed = []
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def is_available(self):
+            return True
+
+        def change_global_option(self, options):
+            pushed.append(dict(options))
+
+    monkeypatch.setattr(app_module.torrent, 'Aria2Client', FakeClient)
+    resp = client.post(
+        '/settings/torrent',
+        data={
+            'torrent_enabled': 'on',
+            'torrent_seed_mode': 'off',
+            'torrent_seed_value': '0',
+            'torrent_max_dl_kib': '1024',
+            'torrent_max_ul_kib': '512',
+        },
+    )
+    assert resp.status_code == 302
+    with app_module.app.app_context():
+        s = app_module.get_settings()
+    assert s['torrent_max_dl_bps'] == 1024 * 1024
+    assert s['torrent_max_ul_bps'] == 512 * 1024
+    assert pushed and pushed[-1] == {
+        'max-overall-download-limit': str(1024 * 1024),
+        'max-overall-upload-limit': str(512 * 1024),
+    }
+
+
+def test_global_stats_endpoint(app_module, client, monkeypatch):
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def get_global_stat(self):
+            return {
+                'downloadSpeed': '2048', 'uploadSpeed': '1024',
+                'numActive': '3', 'numWaiting': '1', 'numStopped': '0',
+            }
+
+    monkeypatch.setattr(app_module.torrent, 'Aria2Client', FakeClient)
+    resp = client.get('/torrent/global-stats')
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body['available'] is True
+    assert body['download_speed_bps'] == 2048
+    assert body['num_active'] == 3
+
+
+def test_global_stats_endpoint_error(app_module, client, monkeypatch):
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def get_global_stat(self):
+            raise app_module.torrent.Aria2Error('down')
+
+    monkeypatch.setattr(app_module.torrent, 'Aria2Client', FakeClient)
+    resp = client.get('/torrent/global-stats')
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body['available'] is False
+
+
+def test_select_files_calls_change_option(app_module, client, monkeypatch):
+    _enable_torrents(app_module)
+    _make_torrent_row(app_module)
+
+    seen = []
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def tell_status(self, gid, keys=None):
+            return {
+                'files': [
+                    {
+                        'index': '1', 'path': '/a', 'length': '100',
+                        'completedLength': '0', 'selected': 'true',
+                    },
+                    {
+                        'index': '2', 'path': '/b', 'length': '200',
+                        'completedLength': '0', 'selected': 'true',
+                    },
+                    {
+                        'index': '3', 'path': '/c', 'length': '300',
+                        'completedLength': '0', 'selected': 'true',
+                    },
+                ],
+            }
+
+        def change_option(self, gid, options):
+            seen.append((gid, dict(options)))
+
+    monkeypatch.setattr(app_module.torrent, 'Aria2Client', FakeClient)
+    resp = client.post(
+        '/torrent/select-files',
+        data={'url': MAGNET, 'file_index': ['1', '3']},
+    )
+    assert resp.status_code == 302
+    assert seen == [('gidA', {'select-file': '1,3'})]
+
+
+def test_select_files_rejects_empty_selection(
+    app_module, client, monkeypatch,
+):
+    _enable_torrents(app_module)
+    _make_torrent_row(app_module)
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def tell_status(self, gid, keys=None):
+            return {
+                'files': [{
+                    'index': '1', 'path': '/a', 'length': '1',
+                    'completedLength': '0', 'selected': 'true',
+                }],
+            }
+
+        def change_option(self, gid, options):
+            raise AssertionError('should not be called')
+
+    monkeypatch.setattr(app_module.torrent, 'Aria2Client', FakeClient)
+    resp = client.post('/torrent/select-files', data={'url': MAGNET})
+    assert resp.status_code == 302

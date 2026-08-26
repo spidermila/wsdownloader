@@ -121,6 +121,9 @@ class Aria2Client:
         return self._call('aria2.tellStatus', gid, keys)
 
     def remove(self, gid: str) -> str:
+        return self._call('aria2.remove', gid)
+
+    def force_remove(self, gid: str) -> str:
         return self._call('aria2.forceRemove', gid)
 
     def remove_download_result(self, gid: str) -> str:
@@ -131,6 +134,12 @@ class Aria2Client:
 
     def unpause(self, gid: str) -> str:
         return self._call('aria2.unpause', gid)
+
+    def pause_all(self) -> str:
+        return self._call('aria2.pauseAll')
+
+    def unpause_all(self) -> str:
+        return self._call('aria2.unpauseAll')
 
     def get_peers(self, gid: str) -> list:
         try:
@@ -146,6 +155,12 @@ class Aria2Client:
 
     def change_option(self, gid: str, options: dict) -> str:
         return self._call('aria2.changeOption', gid, options)
+
+    def change_global_option(self, options: dict) -> str:
+        return self._call('aria2.changeGlobalOption', options)
+
+    def get_global_stat(self) -> dict:
+        return self._call('aria2.getGlobalStat')
 
     def get_version(self) -> dict:
         return self._call('aria2.getVersion')
@@ -179,3 +194,38 @@ def map_status(aria_status: str, seeding_enabled: bool) -> str:
     if aria_status == 'complete' and seeding_enabled:
         return 'seeding'
     return STATUS_MAP.get(aria_status, 'new')
+
+
+def global_limit_options(dl_bps: int, ul_bps: int) -> dict:
+    """Build aria2 global option dict for overall dl/ul speed limits.
+    0 means unlimited."""
+    return {
+        'max-overall-download-limit': str(max(0, int(dl_bps or 0))),
+        'max-overall-upload-limit': str(max(0, int(ul_bps or 0))),
+    }
+
+
+def apply_global_limits(
+    client: 'Aria2Client', dl_bps: int, ul_bps: int,
+) -> bool:
+    """Push overall dl/ul limits to aria2. Returns True on success."""
+    try:
+        client.change_global_option(global_limit_options(dl_bps, ul_bps))
+        return True
+    except Aria2Error as exc:
+        logger.warning('apply_global_limits() Aria2 error: %s', exc)
+        return False
+
+
+def parse_select_file_indices(raw: list[str], file_count: int) -> list[int]:
+    """Return sorted, deduped 1-based file indices in [1, file_count].
+    Invalid entries are dropped."""
+    result: set[int] = set()
+    for item in raw or []:
+        try:
+            idx = int(item)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= idx <= file_count:
+            result.add(idx)
+    return sorted(result)

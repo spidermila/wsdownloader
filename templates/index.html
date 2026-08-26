@@ -158,6 +158,18 @@
                 {% if not settings or settings.torrent_seed_mode == 'off' %}disabled{% endif %}>
             </div>
             <div class="col-auto">
+              <label class="form-label small mb-1" for="torrent_max_dl_kib">Max ↓ (KiB/s, 0 = bez limitu)</label>
+              <input id="torrent_max_dl_kib" type="number" name="torrent_max_dl_kib" step="1" min="0"
+                class="form-control form-control-sm" style="width: 9rem;"
+                value="{{ ((settings.torrent_max_dl_bps if settings else 0) or 0) // 1024 }}">
+            </div>
+            <div class="col-auto">
+              <label class="form-label small mb-1" for="torrent_max_ul_kib">Max ↑ (KiB/s, 0 = bez limitu)</label>
+              <input id="torrent_max_ul_kib" type="number" name="torrent_max_ul_kib" step="1" min="0"
+                class="form-control form-control-sm" style="width: 9rem;"
+                value="{{ ((settings.torrent_max_ul_bps if settings else 0) or 0) // 1024 }}">
+            </div>
+            <div class="col-auto">
               <button type="submit" class="btn btn-sm btn-primary">Uložit</button>
             </div>
           </div>
@@ -166,6 +178,16 @@
             Sdílí se pouze soubory stažené z torrentů, dokud není dosaženo cíle. Ostatní stažené soubory (HTTP, Webshare) se nesdílí nikdy.
           </div>
         </form>
+        {% if settings and settings.torrent_enabled %}
+        <div class="d-flex gap-2 mt-2">
+          <form method="post" action="{{ url_for('pause_all_torrents') }}" class="d-inline">
+            <button type="submit" class="btn btn-sm btn-outline-secondary" title="Pozastavit všechny torrenty">⏸ Pozastavit vše</button>
+          </form>
+          <form method="post" action="{{ url_for('resume_all_torrents') }}" class="d-inline">
+            <button type="submit" class="btn btn-sm btn-outline-primary" title="Obnovit všechny torrenty">▶ Obnovit vše</button>
+          </form>
+        </div>
+        {% endif %}
         <script>
           (function () {
             const modeSel = document.getElementById('torrent_seed_mode');
