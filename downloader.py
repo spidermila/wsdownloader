@@ -41,10 +41,15 @@ APP_ROOT = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv('DATA_DIR') or (APP_ROOT / 'data'))
 DOWNLOADS_PATH = Path(os.getenv('DOWNLOADS_DIR') or (APP_ROOT / 'downloads'))
 DB_PATH = Path(os.getenv('DB_PATH') or (DATA_DIR / 'downloader.db'))
+# .torrent files fetched from URLs are staged here (kept out of DOWNLOADS_PATH
+# so they don't clutter the user-visible downloads listing) and removed once
+# the associated download reaches a terminal state.
+TORRENTS_DIR = DATA_DIR / 'torrents'
 
 # Ensure directories exist before using them
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DOWNLOADS_PATH.mkdir(parents=True, exist_ok=True)
+TORRENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 BASE_URL = 'https://webshare.cz/api/'
 
@@ -112,7 +117,7 @@ def fetch_active_torrents() -> list[sqlite3.Row]:
                    upload_speed_bps, uploaded_bytes
              FROM links
              WHERE kind IN ('magnet', 'torrent')
-               AND status NOT IN ('failed', 'space_waiting')
+               AND status != 'failed'
              ORDER BY created_at ASC
         """).fetchall()
     finally:
@@ -836,6 +841,49 @@ def _fetch_torrent_bytes(url: str) -> Optional[bytes]:
         return None
 
 
+def _torrent_file_path(row_id: int) -> Path:
+    return TORRENTS_DIR / f'link-{row_id}.torrent'
+
+
+def _load_or_fetch_torrent_bytes(row_id: int, url: str) -> Optional[bytes]:
+    """Return .torrent bytes, using a cached copy under TORRENTS_DIR if
+    available. Fetches from URL and stages the file otherwise."""
+    path = _torrent_file_path(row_id)
+    if path.exists():
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            logger.warning(
+                '_load_or_fetch_torrent_bytes() Failed to read cached '
+                '%s: %s', path, exc,
+            )
+    payload = _fetch_torrent_bytes(url)
+    if payload is None:
+        return None
+    try:
+        tmp = path.with_suffix('.torrent.tmp')
+        tmp.write_bytes(payload)
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.warning(
+            '_load_or_fetch_torrent_bytes() Failed to stage %s: %s',
+            path, exc,
+        )
+    return payload
+
+
+def _delete_torrent_file(row_id: int) -> None:
+    path = _torrent_file_path(row_id)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning(
+            '_delete_torrent_file() Failed to remove %s: %s', path, exc,
+        )
+
+
 def _enqueue_torrent(
     row: sqlite3.Row, client: 'torrent.Aria2Client', options: dict,
 ) -> Optional[str]:
@@ -844,7 +892,7 @@ def _enqueue_torrent(
     try:
         if kind == torrent.KIND_MAGNET:
             return client.add_uri(url, options)
-        payload = _fetch_torrent_bytes(url)
+        payload = _load_or_fetch_torrent_bytes(row['id'], url)
         if payload is None:
             return None
         return client.add_torrent(payload, options)
@@ -881,6 +929,7 @@ def _apply_torrent_status(
         not seeding_enabled or not runtime_seeder
     ):
         _try_remove_result(client, row['external_id'] or '')
+        _delete_torrent_file(row_id)
         delete_by_id(row_id)
         return
 
@@ -926,6 +975,7 @@ def _apply_torrent_status(
         message = status.get('errorMessage', '') or 'Unknown error'
         log_download_error(gid, row['url'], 'Torrent error', message)
         _try_remove_result(client, gid)
+        _delete_torrent_file(row_id)
 
 
 def torrent_loop() -> None:
@@ -961,6 +1011,7 @@ def torrent_loop() -> None:
                     'Torrent error', 'Failed to enqueue torrent',
                 )
                 set_status_downloaded_by_id(row['id'], 'failed')
+                _delete_torrent_file(row['id'])
                 continue
             set_external_id_by_id(row['id'], gid)
             set_status_downloaded_by_id(row['id'], 'downloading')

@@ -1,8 +1,11 @@
 """Tests for the torrent.py helper module (aria2 RPC wrapper + helpers)."""
 import base64
+import secrets
 
 import pytest
 import requests
+
+TEST_RPC_SECRET = secrets.token_hex(16)
 
 
 @pytest.fixture()
@@ -80,11 +83,11 @@ def test_call_returns_result(torrent_module, monkeypatch):
         return _FakeResponse(data={'result': 'gid123'})
 
     monkeypatch.setattr(torrent_module.requests, 'post', fake_post)
-    client = torrent_module.Aria2Client(secret='sekret')
+    client = torrent_module.Aria2Client(secret=TEST_RPC_SECRET)
     gid = client.add_uri('magnet:?xt=urn:btih:abc')
     assert gid == 'gid123'
     assert captured['payload']['method'] == 'aria2.addUri'
-    assert captured['payload']['params'][0] == 'token:sekret'
+    assert captured['payload']['params'][0] == f'token:{TEST_RPC_SECRET}'
 
 
 def test_call_raises_on_transport_error(torrent_module, monkeypatch):
@@ -93,7 +96,7 @@ def test_call_raises_on_transport_error(torrent_module, monkeypatch):
 
     monkeypatch.setattr(torrent_module.requests, 'post', fake_post)
     with pytest.raises(torrent_module.Aria2Error):
-        torrent_module.Aria2Client(secret='s').get_version()
+        torrent_module.Aria2Client(secret=TEST_RPC_SECRET).get_version()
 
 
 def test_call_raises_on_non_json(torrent_module, monkeypatch):
@@ -102,7 +105,7 @@ def test_call_raises_on_non_json(torrent_module, monkeypatch):
         lambda *a, **kw: _FakeResponse(text='not json', raise_json=True),
     )
     with pytest.raises(torrent_module.Aria2Error):
-        torrent_module.Aria2Client(secret='s').get_version()
+        torrent_module.Aria2Client(secret=TEST_RPC_SECRET).get_version()
 
 
 def test_call_raises_on_rpc_error(torrent_module, monkeypatch):
@@ -113,7 +116,7 @@ def test_call_raises_on_rpc_error(torrent_module, monkeypatch):
         ),
     )
     with pytest.raises(torrent_module.Aria2Error):
-        torrent_module.Aria2Client(secret='s').get_version()
+        torrent_module.Aria2Client(secret=TEST_RPC_SECRET).get_version()
 
 
 def test_add_torrent_base64_encodes_payload(torrent_module, monkeypatch):
@@ -124,7 +127,7 @@ def test_add_torrent_base64_encodes_payload(torrent_module, monkeypatch):
         return _FakeResponse(data={'result': 'g'})
 
     monkeypatch.setattr(torrent_module.requests, 'post', fake_post)
-    client = torrent_module.Aria2Client(secret='s')
+    client = torrent_module.Aria2Client(secret=TEST_RPC_SECRET)
     client.add_torrent(b'raw-bytes', {'dir': '/downloads'})
     assert seen['params'][1] == base64.b64encode(b'raw-bytes').decode('ascii')
     assert seen['params'][3] == {'dir': '/downloads'}
@@ -138,7 +141,7 @@ def test_tell_status_default_keys(torrent_module, monkeypatch):
         return _FakeResponse(data={'result': {}})
 
     monkeypatch.setattr(torrent_module.requests, 'post', fake_post)
-    torrent_module.Aria2Client(secret='s').tell_status('gid1')
+    torrent_module.Aria2Client(secret=TEST_RPC_SECRET).tell_status('gid1')
     assert 'status' in seen['params'][2]
     assert 'downloadSpeed' in seen['params'][2]
 
@@ -151,7 +154,9 @@ def test_tell_status_custom_keys(torrent_module, monkeypatch):
         return _FakeResponse(data={'result': {}})
 
     monkeypatch.setattr(torrent_module.requests, 'post', fake_post)
-    torrent_module.Aria2Client(secret='s').tell_status('gid1', ['status'])
+    torrent_module.Aria2Client(
+        secret=TEST_RPC_SECRET,
+    ).tell_status('gid1', ['status'])
     assert seen['p'][2] == ['status']
 
 
@@ -162,7 +167,7 @@ def test_get_peers_returns_list(torrent_module, monkeypatch):
             data={'result': [{'ip': '1.2.3.4'}]},
         ),
     )
-    peers = torrent_module.Aria2Client(secret='s').get_peers('g')
+    peers = torrent_module.Aria2Client(secret=TEST_RPC_SECRET).get_peers('g')
     assert peers == [{'ip': '1.2.3.4'}]
 
 
@@ -171,7 +176,9 @@ def test_get_peers_returns_empty_on_error(torrent_module, monkeypatch):
         raise requests.RequestException('boom')
 
     monkeypatch.setattr(torrent_module.requests, 'post', boom)
-    assert torrent_module.Aria2Client(secret='s').get_peers('g') == []
+    assert torrent_module.Aria2Client(
+        secret=TEST_RPC_SECRET,
+    ).get_peers('g') == []
 
 
 def test_get_servers_returns_list(torrent_module, monkeypatch):
@@ -181,7 +188,9 @@ def test_get_servers_returns_list(torrent_module, monkeypatch):
             data={'result': [{'index': '1', 'servers': []}]},
         ),
     )
-    servers = torrent_module.Aria2Client(secret='s').get_servers('g')
+    servers = torrent_module.Aria2Client(
+        secret=TEST_RPC_SECRET,
+    ).get_servers('g')
     assert servers[0]['index'] == '1'
 
 
@@ -192,7 +201,9 @@ def test_get_servers_returns_empty_on_error(torrent_module, monkeypatch):
             requests.RequestException('down'),
         ),
     )
-    assert torrent_module.Aria2Client(secret='s').get_servers('g') == []
+    assert torrent_module.Aria2Client(
+        secret=TEST_RPC_SECRET,
+    ).get_servers('g') == []
 
 
 def test_get_peers_returns_empty_when_result_is_none(
@@ -202,7 +213,9 @@ def test_get_peers_returns_empty_when_result_is_none(
         torrent_module.requests, 'post',
         lambda *a, **kw: _FakeResponse(data={'result': None}),
     )
-    assert torrent_module.Aria2Client(secret='s').get_peers('g') == []
+    assert torrent_module.Aria2Client(
+        secret=TEST_RPC_SECRET,
+    ).get_peers('g') == []
 
 
 def test_remove_and_change_option(torrent_module, monkeypatch):
@@ -213,7 +226,7 @@ def test_remove_and_change_option(torrent_module, monkeypatch):
         return _FakeResponse(data={'result': 'ok'})
 
     monkeypatch.setattr(torrent_module.requests, 'post', fake_post)
-    client = torrent_module.Aria2Client(secret='s')
+    client = torrent_module.Aria2Client(secret=TEST_RPC_SECRET)
     client.remove('g')
     client.remove_download_result('g')
     client.change_option('g', {'seed-ratio': '1.0'})
@@ -229,7 +242,9 @@ def test_is_available_true(torrent_module, monkeypatch):
         torrent_module.requests, 'post',
         lambda *a, **kw: _FakeResponse(data={'result': {'version': '1.37.0'}}),
     )
-    assert torrent_module.Aria2Client(secret='s').is_available() is True
+    assert torrent_module.Aria2Client(
+        secret=TEST_RPC_SECRET,
+    ).is_available() is True
 
 
 def test_is_available_false_on_error(torrent_module, monkeypatch):
@@ -239,7 +254,9 @@ def test_is_available_false_on_error(torrent_module, monkeypatch):
             requests.RequestException('down'),
         ),
     )
-    assert torrent_module.Aria2Client(secret='s').is_available() is False
+    assert torrent_module.Aria2Client(
+        secret=TEST_RPC_SECRET,
+    ).is_available() is False
 
 
 def test_seed_options_off(torrent_module):

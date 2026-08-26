@@ -79,10 +79,14 @@ APP_ROOT = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv('DATA_DIR') or (APP_ROOT / 'data'))
 DOWNLOADS_PATH = Path(os.getenv('DOWNLOADS_DIR') or (APP_ROOT / 'downloads'))
 DB_PATH = Path(os.getenv('DB_PATH') or (DATA_DIR / 'downloader.db'))
+# Kept in sync with downloader.TORRENTS_DIR; staged .torrent files live here
+# and are removed by delete_link() / the downloader lifecycle helpers.
+TORRENTS_DIR = DATA_DIR / 'torrents'
 
 # Ensure directories exist before using them
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DOWNLOADS_PATH.mkdir(parents=True, exist_ok=True)
+TORRENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 BASE_URL = 'https://webshare.cz/api/'
 
@@ -1035,6 +1039,19 @@ def _remove_from_aria2(external_id: str) -> bool:
         return False
 
 
+def _delete_staged_torrent_file(row_id: int) -> None:
+    path = TORRENTS_DIR / f'link-{row_id}.torrent'
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning(
+            '_delete_staged_torrent_file() Failed to remove %s: %s',
+            path, exc,
+        )
+
+
 def _torrent_row_by_url(url: str):
     return get_db().execute(
         'SELECT id, kind, external_id, status FROM links WHERE url = ?',
@@ -1060,7 +1077,7 @@ def delete_link():
 
     db = get_db()
     row = db.execute(
-        'SELECT kind, external_id FROM links WHERE url = ?',
+        'SELECT id, kind, external_id FROM links WHERE url = ?',
         (url_to_delete,),
     ).fetchone()
     if row is None:
@@ -1076,6 +1093,7 @@ def delete_link():
                 'error',
             )
             return redirect(url_for('index'))
+        _delete_staged_torrent_file(row['id'])
 
     db.execute('DELETE FROM links WHERE url = ?', (url_to_delete,))
     db.commit()
