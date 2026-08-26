@@ -17,6 +17,7 @@ from threading import Lock
 from threading import Thread
 from time import sleep
 from typing import Optional
+from urllib.parse import parse_qsl
 from urllib.parse import urlparse
 
 import requests
@@ -494,6 +495,8 @@ def delete_download_error(file_id: str) -> bool:
 MAGNET_RE = re.compile(
     r'^magnet:\?(?:[a-zA-Z0-9._%+-]+=[^&\s]+&?)+$',
 )
+BTIH_HEX_RE = re.compile(r'^[0-9a-fA-F]{40}$')
+BTIH_B32_RE = re.compile(r'^[A-Z2-7]{32}$')
 
 
 def _torrents_enabled() -> bool:
@@ -503,11 +506,25 @@ def _torrents_enabled() -> bool:
         return False
 
 
+def _magnet_has_valid_btih(url: str) -> bool:
+    query = url[len('magnet:?'):] if url.startswith('magnet:?') else url
+    for key, value in parse_qsl(query, keep_blank_values=True):
+        if key != 'xt':
+            continue
+        prefix = 'urn:btih:'
+        if not value.lower().startswith(prefix):
+            continue
+        raw = value[len(prefix):]
+        if BTIH_HEX_RE.match(raw) or BTIH_B32_RE.match(raw.upper()):
+            return True
+    return False
+
+
 def validate_url(url) -> str:
     if url and url.startswith('magnet:?'):
         if not _torrents_enabled():
             return 'Torrenty nejsou povoleny. Zapněte je v nastavení.'
-        if not MAGNET_RE.fullmatch(url) or 'xt=urn:btih:' not in url.lower():
+        if not MAGNET_RE.fullmatch(url) or not _magnet_has_valid_btih(url):
             return 'Neplatný magnet link.'
         return 'ok'
 
@@ -739,7 +756,8 @@ def get_db_state_hash() -> str:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         rows = conn.execute("""
-            SELECT url, status, pct_downloaded, size_bytes, speed_bps
+            SELECT url, status, pct_downloaded, size_bytes, speed_bps,
+                   connections, upload_speed_bps, uploaded_bytes
             FROM links ORDER BY url
         """).fetchall()
 
@@ -755,7 +773,8 @@ def get_db_state_hash() -> str:
             state_part = (
                 f"{row['url']}:{row['status']}:"
                 f"{row['pct_downloaded']}:{row['size_bytes']}:"
-                f"{row['speed_bps']}"
+                f"{row['speed_bps']}:{row['connections']}:"
+                f"{row['upload_speed_bps']}:{row['uploaded_bytes']}"
             )
             state_parts.append(state_part)
 
@@ -1000,18 +1019,20 @@ def logout():
     return redirect(url_for('index'))
 
 
-def _remove_from_aria2(external_id: str) -> None:
+def _remove_from_aria2(external_id: str) -> bool:
     if not external_id:
-        return
+        return True
     try:
         client = torrent.Aria2Client()
         client.remove(external_id)
         client.remove_download_result(external_id)
+        return True
     except torrent.Aria2Error as exc:
         logger.warning(
             '_remove_from_aria2() Failed to remove GID %s: %s',
             external_id, exc,
         )
+        return False
 
 
 def _torrent_row_by_url(url: str):
@@ -1042,18 +1063,25 @@ def delete_link():
         'SELECT kind, external_id FROM links WHERE url = ?',
         (url_to_delete,),
     ).fetchone()
-    cur = db.execute('DELETE FROM links WHERE url = ?', (url_to_delete,))
-    db.commit()
-
-    if cur.rowcount > 0:
-        if row is not None and row['kind'] != torrent.KIND_HTTP:
-            _remove_from_aria2(row['external_id'])
-        logger.info('delete_link() Link deleted: %s', url_to_delete)
-        flash(f"Odstraněno: {url_to_delete}", 'success')
-        socketio.emit('link_deleted', {'url': url_to_delete})
-    else:
+    if row is None:
         logger.warning('delete_link() Link not found: %s', url_to_delete)
         flash(f"Nenalezeno: {url_to_delete}", 'error')
+        return redirect(url_for('index'))
+
+    if row['kind'] != torrent.KIND_HTTP:
+        if not _remove_from_aria2(row['external_id']):
+            flash(
+                'Nepodařilo se odebrat torrent z aria2. '
+                'Zkuste to znovu.',
+                'error',
+            )
+            return redirect(url_for('index'))
+
+    db.execute('DELETE FROM links WHERE url = ?', (url_to_delete,))
+    db.commit()
+    logger.info('delete_link() Link deleted: %s', url_to_delete)
+    flash(f"Odstraněno: {url_to_delete}", 'success')
+    socketio.emit('link_deleted', {'url': url_to_delete})
     return redirect(url_for('index'))
 
 
@@ -1084,6 +1112,9 @@ def delete_file():
             flash(f"Odstraněn soubor: {filename}", 'success')
             socketio.emit('file_deleted', {'filename': filename})
         elif candidate.exists() and candidate.is_dir():
+            for child in candidate.rglob('*'):
+                if child.is_file():
+                    _clear_file_caches(child)
             shutil.rmtree(candidate)
             logger.info('delete_file() Directory deleted: %s', candidate)
             flash(f"Odstraněna složka: {filename}", 'success')
@@ -1294,7 +1325,13 @@ def stop_seeding_torrent():
     if row is None or row['kind'] == torrent.KIND_HTTP:
         flash('Není to torrent.', 'error')
         return redirect(url_for('index'))
-    _remove_from_aria2(row['external_id'] or '')
+    if not _remove_from_aria2(row['external_id'] or ''):
+        flash(
+            'Nepodařilo se ukončit sdílení v aria2. '
+            'Zkuste to znovu.',
+            'error',
+        )
+        return redirect(url_for('index'))
     db = get_db()
     db.execute('DELETE FROM links WHERE id = ?', (row['id'],))
     db.commit()

@@ -524,6 +524,12 @@
     // Track if user is currently renaming a file
     let isRenaming = false;
 
+    function escapeHtml(value) {
+      return String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      })[ch]);
+    }
+
     function renderLinks(links, totalQueueSizeHuman) {
       const container = document.getElementById('links-container');
       if (!container) return;
@@ -569,9 +575,9 @@
         const tr = document.createElement('tr');
         tr.dataset.url = l.url;
         tr.innerHTML = `
-          <td class="fw-semibold text-break col-filename">${renderKindBadge(l.kind)}${l.file_name}</td>
+          <td class="fw-semibold text-break col-filename">${renderKindBadge(l.kind)}${escapeHtml(l.file_name)}</td>
           <td class="d-sm-table-cell status-cell">${renderStatus(l.status)}</td>
-          <td class="d-sm-table-cell size-cell">${l.human_size}</td>
+          <td class="d-sm-table-cell size-cell">${escapeHtml(l.human_size)}</td>
           <td class="d-sm-table-cell progress-cell">${renderProgress(l)}</td>
           <td class="actions-cell">${renderActions(l)}</td>
         `;
@@ -613,30 +619,31 @@
       files.forEach(f => {
         const tr = document.createElement('tr');
         tr.dataset.filename = f.name;
+        const safeName = escapeHtml(f.name);
         const playBtn = isVideoFile(f.name)
           ? `<a href="/player/${encodeURIComponent(f.name)}"
                class="btn btn-sm btn-outline-success me-1 play-btn${playEnabled() ? '' : ' d-none'}"
-               aria-label="Přehrát ${f.name}">
+               aria-label="Přehrát ${safeName}">
               ▶ Přehrát
              </a>`
           : '';
         tr.innerHTML = `
           <td class="fw-semibold text-break col-filename">
-            <span class="filename-display">${f.name}</span>
+            <span class="filename-display">${safeName}</span>
           </td>
-          <td class="d-none d-sm-table-cell">${f.size}</td>
+          <td class="d-none d-sm-table-cell">${escapeHtml(f.size)}</td>
           <td class="actions-cell">
             ${playBtn}
-            <button type="button" class="btn btn-sm btn-outline-secondary me-1" onclick="startRename(this)" aria-label="Přejmenovat ${f.name}">
+            <button type="button" class="btn btn-sm btn-outline-secondary me-1" onclick="startRename(this)" aria-label="Přejmenovat ${safeName}">
               Přejmenovat
             </button>
             <form method="post"
               action="{{ url_for('delete_file') }}"
               class="d-inline">
-              <input type="hidden" name="filename" value="${f.name}">
+              <input type="hidden" name="filename" value="${safeName}">
               <button type="submit"
                   class="btn btn-sm btn-danger"
-                  aria-label="Odstranit ${f.name}">
+                  aria-label="Odstranit ${safeName}">
                 Smazat
               </button>
             </form>
@@ -686,40 +693,41 @@
 
     function renderActions(l) {
       const isTorrent = l.kind && l.kind !== 'http';
+      const safeUrl = escapeHtml(l.url);
       const info = isTorrent
         ? `<a href="/torrent/details?url=${encodeURIComponent(l.url)}" class="btn btn-sm btn-outline-info" title="Detail">ℹ</a>`
         : '';
       const del = `
         <form method="post" action="{{ url_for('delete_link') }}" class="d-inline">
-          <input type="hidden" name="url" value="${l.url}">
+          <input type="hidden" name="url" value="${safeUrl}">
           <button type="submit" class="btn btn-sm btn-danger" title="Zrušit a smazat">✕</button>
         </form>`;
       if (isTorrent && l.status === 'downloading') {
         return `${info}
           <form method="post" action="{{ url_for('pause_torrent') }}" class="d-inline">
-            <input type="hidden" name="url" value="${l.url}">
+            <input type="hidden" name="url" value="${safeUrl}">
             <button type="submit" class="btn btn-sm btn-outline-secondary" title="Pozastavit">⏸</button>
           </form>${del}`;
       }
       if (isTorrent && l.status === 'paused') {
         return `${info}
           <form method="post" action="{{ url_for('resume_torrent') }}" class="d-inline">
-            <input type="hidden" name="url" value="${l.url}">
+            <input type="hidden" name="url" value="${safeUrl}">
             <button type="submit" class="btn btn-sm btn-outline-primary" title="Obnovit">▶</button>
           </form>${del}`;
       }
       if (l.status === 'seeding') {
         return `${info}
           <form method="post" action="{{ url_for('stop_seeding_torrent') }}" class="d-inline">
-            <input type="hidden" name="url" value="${l.url}">
+            <input type="hidden" name="url" value="${safeUrl}">
             <button type="submit" class="btn btn-sm btn-outline-warning" title="Ukončit sdílení">⏹ Ukončit sdílení</button>
           </form>`;
       }
       if (l.status === 'downloading') return info || '<span class="text-muted">—</span>';
       const delFallback = `${info}
         <form method="post" action="{{ url_for('delete_link') }}" class="d-inline">
-          <input type="hidden" name="url" value="${l.url}">
-          <button type="submit" class="btn btn-sm btn-danger" aria-label="Odstranit ${l.url}">Smazat</button>
+          <input type="hidden" name="url" value="${safeUrl}">
+          <button type="submit" class="btn btn-sm btn-danger" aria-label="Odstranit ${safeUrl}">Smazat</button>
         </form>`;
       return delFallback;
     }
