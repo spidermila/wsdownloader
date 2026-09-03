@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="cs" data-bs-theme="{{ 'dark' if settings and settings.dark_mode else 'light' }}">
+<head>
+  <meta charset="UTF-8" />
+  <title>Detail torrentu — Stahovač</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    a { text-decoration: none; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .kv td:first-child { color: var(--bs-secondary-color); width: 220px; }
+    .kv td { padding: 0.35rem 0.6rem; }
+    .table-sm.peers td { padding: 0.25rem 0.5rem; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <div class="container py-4">
+    <h1 class="mb-4 d-flex align-items-center justify-content-between">
+      <span class="text-truncate" style="max-width: 80%;">
+        {% if link.kind == 'magnet' %}🧲{% else %}📦{% endif %}
+        Detail torrentu
+      </span>
+      <a href="{{ url_for('index') }}" class="btn btn-outline-secondary btn-sm">Zpět</a>
+    </h1>
+
+    <div class="card mb-4">
+      <div class="card-body">
+        <h2 class="h5 mb-3">Obecné</h2>
+        <table class="table table-sm kv mb-0">
+          <tbody>
+            <tr><td>Název</td><td class="text-break">{{ link.get_file_name() }}</td></tr>
+            <tr><td>Stav</td><td>{{ link.status }}</td></tr>
+            <tr><td>Typ</td><td>{{ link.kind }}</td></tr>
+            <tr><td>Velikost</td><td>{{ link.size_bytes | human_size }} <span class="text-muted mono">({{ link.size_bytes }} B)</span></td></tr>
+            <tr><td>Staženo</td><td>{{ link.pct_downloaded }}%</td></tr>
+            <tr><td>↓ Rychlost stahování</td><td>{{ link.speed_bps | human_speed or '0 KB/s' }}</td></tr>
+            <tr><td>↑ Rychlost odesílání</td><td>{{ link.upload_speed_bps | human_speed or '0 KB/s' }}</td></tr>
+            <tr><td>Odesláno celkem</td><td>{{ link.uploaded_bytes | human_size }}</td></tr>
+            <tr><td>Poměr sdílení</td><td>{% if link.size_bytes %}{{ '%.3f'|format(link.uploaded_bytes / link.size_bytes) }}{% else %}—{% endif %}</td></tr>
+            <tr><td>Aktivní spojení</td><td>{{ link.connections }}</td></tr>
+            <tr><td>Aria2 GID</td><td class="mono">{{ link.external_id or '—' }}</td></tr>
+            <tr><td>Zdrojová URL</td><td class="text-break mono">{{ link.url }}</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    {% if not detail.aria2_available %}
+      <div class="alert alert-warning" role="alert">
+        Detailní informace z aria2 nejsou dostupné{% if detail.error %} — {{ detail.error }}{% endif %}.
+      </div>
+    {% else %}
+      {% set s = detail.status %}
+      <div class="card mb-4">
+        <div class="card-body">
+          <h2 class="h5 mb-3">Aria2 status</h2>
+          <table class="table table-sm kv mb-0">
+            <tbody>
+              <tr><td>aria2 status</td><td>{{ s.get('status', '—') }}</td></tr>
+              <tr><td>Celková velikost</td><td>{{ (s.get('totalLength') or 0) | int | human_size }}</td></tr>
+              <tr><td>Staženo (bytes)</td><td>{{ (s.get('completedLength') or 0) | int | human_size }}</td></tr>
+              <tr><td>Odesláno (bytes)</td><td>{{ (s.get('uploadLength') or 0) | int | human_size }}</td></tr>
+              <tr><td>Downloaded/piece count</td><td>{{ s.get('numPieces', '—') }} × {{ (s.get('pieceLength') or 0) | int | human_size }}</td></tr>
+              <tr><td>Konektivita</td><td>{{ s.get('connections', 0) }} spojení, seeder: {{ s.get('seeder', '—') }}</td></tr>
+              {% if s.get('bittorrent') %}
+                {% set bt = s.get('bittorrent') %}
+                <tr><td>Info hash</td><td class="mono">{{ s.get('infoHash', '—') }}</td></tr>
+                <tr><td>Komentář</td><td>{{ bt.get('comment', '—') }}</td></tr>
+                <tr><td>Mode</td><td>{{ bt.get('mode', '—') }}</td></tr>
+                <tr><td>Vytvořeno</td><td>{{ bt.get('creationDate', '—') }}</td></tr>
+              {% endif %}
+              {% if s.get('errorMessage') %}
+                <tr><td class="text-danger">Chyba</td><td class="text-danger">{{ s.get('errorMessage') }}</td></tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {% if s.get('files') %}
+        {% set file_list = s.get('files') %}
+        {% set has_multi = file_list|length > 1 %}
+        <div class="card mb-4">
+          <div class="card-body">
+            <h2 class="h5 mb-3">Soubory ({{ file_list|length }})</h2>
+            {% if has_multi %}
+              <p class="small text-muted mb-2">
+                Označ soubory, které chceš stáhnout. Odznačené aria2 nestaáhne (nebo je zastaví, pokud ještě nejsou hotové).
+              </p>
+            {% endif %}
+            <form method="post" action="{{ url_for('select_torrent_files') }}">
+              <input type="hidden" name="url" value="{{ link.url }}">
+              <div class="table-responsive">
+                <table class="table table-sm mb-0">
+                  <thead><tr>
+                    {% if has_multi %}<th style="width: 2.5rem;">Stáhnout</th>{% endif %}
+                    <th>Cesta</th><th class="text-end">Velikost</th>
+                    <th class="text-end">Staženo</th><th class="text-end">%</th>
+                  </tr></thead>
+                  <tbody>
+                    {% for f in file_list %}
+                      {% set fl = (f.get('length') or 0) | int %}
+                      {% set fc = (f.get('completedLength') or 0) | int %}
+                      {% set idx = (f.get('index') or loop.index) | int %}
+                      {% set selected = (f.get('selected', 'true')|string|lower) == 'true' %}
+                      <tr>
+                        {% if has_multi %}
+                          <td>
+                            <input class="form-check-input" type="checkbox"
+                                   name="file_index" value="{{ idx }}"
+                                   {% if selected %}checked{% endif %}>
+                          </td>
+                        {% endif %}
+                        <td class="text-break mono">{{ f.get('path', '—') }}</td>
+                        <td class="text-end">{{ fl | human_size }}</td>
+                        <td class="text-end">{{ fc | human_size }}</td>
+                        <td class="text-end">{% if fl %}{{ '%.1f'|format(fc * 100 / fl) }}{% else %}—{% endif %}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+              {% if has_multi %}
+                <div class="mt-2">
+                  <button type="submit" class="btn btn-sm btn-primary">Uložit výběr</button>
+                </div>
+              {% endif %}
+            </form>
+          </div>
+        </div>
+      {% endif %}
+
+      {% if detail.peers %}
+        <div class="card mb-4">
+          <div class="card-body">
+            <h2 class="h5 mb-3">Peers ({{ detail.peers|length }})</h2>
+            <div class="table-responsive">
+              <table class="table table-sm peers mb-0">
+                <thead><tr>
+                  <th>IP</th><th>Port</th><th class="text-end">↓</th>
+                  <th class="text-end">↑</th><th class="text-end">Progres</th>
+                  <th>Seeder</th><th>Vlajky</th>
+                </tr></thead>
+                <tbody>
+                  {% for p in detail.peers %}
+                    <tr>
+                      <td class="mono">{{ p.get('ip', '—') }}</td>
+                      <td>{{ p.get('port', '—') }}</td>
+                      <td class="text-end">{{ (p.get('downloadSpeed') or 0) | int | human_speed or '—' }}</td>
+                      <td class="text-end">{{ (p.get('uploadSpeed') or 0) | int | human_speed or '—' }}</td>
+                      <td class="text-end">{% if p.get('bitfield') %}{{ p.get('bitfield')|length }} hex{% else %}—{% endif %}</td>
+                      <td>{{ p.get('seeder', '—') }}</td>
+                      <td class="mono small">
+                        {% if p.get('amChoking') == 'true' %}amChoking {% endif %}
+                        {% if p.get('peerChoking') == 'true' %}peerChoking{% endif %}
+                      </td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      {% endif %}
+
+      {% if detail.servers %}
+        <div class="card mb-4">
+          <div class="card-body">
+            <h2 class="h5 mb-3">HTTP webseeds ({{ detail.servers|length }})</h2>
+            <pre class="mono small mb-0">{{ detail.servers | tojson(indent=2) }}</pre>
+          </div>
+        </div>
+      {% endif %}
+    {% endif %}
+
+    <p class="small text-muted">Stránka se neaktualizuje automaticky — pro nejnovější údaje obnov stránku.</p>
+  </div>
+</body>
+</html>

@@ -155,14 +155,23 @@ def test_main_loop_stores_size_for_webshare_queue_files(
 
     monkeypatch.setattr(
         downloader_module.requests, 'head',
-        lambda url: _FakeHeadResponse(),
+        lambda *args, **kwargs: _FakeHeadResponse(),
     )
     # The 404 branch above calls sleep(10) - skip the real wait in tests.
     monkeypatch.setattr(downloader_module, 'sleep', lambda seconds: None)
 
     downloader_module.main_loop()
 
-    row = downloader_module.fetch_oldest()
+    import sqlite3
+    conn = sqlite3.connect(downloader_module.DB_PATH)
+    try:
+        row = conn.execute(
+            'SELECT size_bytes FROM links '
+            'WHERE url = ?',
+            ('https://webshare.example/download/abc123/movie.mp4',),
+        ).fetchone()
+    finally:
+        conn.close()
     assert row is not None
-    assert row['size_bytes'] == 104857600
+    assert row[0] == 104857600
     assert dequeued == ['abc123']

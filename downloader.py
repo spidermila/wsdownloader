@@ -3,6 +3,7 @@ import os
 import shutil
 import sqlite3
 import sys
+import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from time import sleep
@@ -13,6 +14,8 @@ from typing import TypedDict
 import requests
 from requests import HTTPError
 from requests import RequestException
+
+import torrent
 
 
 def configure_logging() -> logging.Logger:
@@ -38,10 +41,15 @@ APP_ROOT = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv('DATA_DIR') or (APP_ROOT / 'data'))
 DOWNLOADS_PATH = Path(os.getenv('DOWNLOADS_DIR') or (APP_ROOT / 'downloads'))
 DB_PATH = Path(os.getenv('DB_PATH') or (DATA_DIR / 'downloader.db'))
+# .torrent files fetched from URLs are staged here (kept out of DOWNLOADS_PATH
+# so they don't clutter the user-visible downloads listing) and removed once
+# the associated download reaches a terminal state.
+TORRENTS_DIR = DATA_DIR / 'torrents'
 
 # Ensure directories exist before using them
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DOWNLOADS_PATH.mkdir(parents=True, exist_ok=True)
+TORRENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 BASE_URL = 'https://webshare.cz/api/'
 
@@ -86,12 +94,33 @@ def get_db() -> sqlite3.Connection:
 
 def fetch_oldest() -> Optional[sqlite3.Row]:
     db = get_db()
-    return db.execute("""
-        SELECT id, url, created_at, status, pct_downloaded, size_bytes
-         FROM links
-         WHERE status NOT IN ('connection_failed', 'failed', 'space_waiting')
-         ORDER BY created_at ASC LIMIT 1
-    """).fetchone()
+    try:
+        return db.execute("""
+            SELECT id, url, created_at, status, pct_downloaded,
+                   size_bytes, kind, external_id
+             FROM links
+             WHERE status NOT IN ('connection_failed', 'failed')
+               AND (kind IS NULL OR kind = 'http')
+             ORDER BY created_at ASC LIMIT 1
+        """).fetchone()
+    finally:
+        db.close()
+
+
+def fetch_active_torrents() -> list[sqlite3.Row]:
+    db = get_db()
+    try:
+        return db.execute("""
+            SELECT id, url, status, pct_downloaded, size_bytes, speed_bps,
+                   kind, external_id, connections,
+                   upload_speed_bps, uploaded_bytes
+             FROM links
+             WHERE kind IN ('magnet', 'torrent')
+               AND status != 'failed'
+             ORDER BY created_at ASC
+        """).fetchall()
+    finally:
+        db.close()
 
 
 def delete_by_id(row_id: int) -> int:
@@ -208,10 +237,14 @@ def set_status_downloaded_by_id(row_id: int, new_status: str) -> bool:
 
 def get_settings() -> dict:
     db = get_db()
-    row = db.execute("""
-        SELECT id, token, auto_download, user_name, password_hash
-        FROM settings WHERE id = 1
-    """).fetchone()
+    try:
+        row = db.execute("""
+            SELECT id, token, auto_download, user_name, password_hash,
+                   torrent_enabled, torrent_seed_mode, torrent_seed_value
+            FROM settings WHERE id = 1
+        """).fetchone()
+    finally:
+        db.close()
     if not row:
         return {
             'id': 1,
@@ -219,8 +252,62 @@ def get_settings() -> dict:
             'auto_download': 0,
             'user_name': '',
             'password_hash': '',
+            'torrent_enabled': 0,
+            'torrent_seed_mode': 'off',
+            'torrent_seed_value': 0,
         }
     return dict(row)
+
+
+def set_external_id_by_id(row_id: int, external_id: str) -> bool:
+    db = get_db()
+    try:
+        cur = db.execute(
+            'UPDATE links SET external_id = ? WHERE id = ?',
+            (external_id, row_id),
+        )
+        db.commit()
+        return cur.rowcount > 0
+    except sqlite3.Error as exc:
+        logger.error('set_external_id_by_id() Database error: %s', exc)
+        return False
+    finally:
+        db.close()
+
+
+def set_connections_by_id(row_id: int, connections: int) -> bool:
+    db = get_db()
+    try:
+        cur = db.execute(
+            'UPDATE links SET connections = ? WHERE id = ?',
+            (int(connections), row_id),
+        )
+        db.commit()
+        return cur.rowcount > 0
+    except sqlite3.Error as exc:
+        logger.error('set_connections_by_id() Database error: %s', exc)
+        return False
+    finally:
+        db.close()
+
+
+def set_upload_stats_by_id(
+    row_id: int, upload_speed_bps: int, uploaded_bytes: int,
+) -> bool:
+    db = get_db()
+    try:
+        cur = db.execute(
+            'UPDATE links SET upload_speed_bps = ?, uploaded_bytes = ? '
+            'WHERE id = ?',
+            (int(upload_speed_bps), int(uploaded_bytes), row_id),
+        )
+        db.commit()
+        return cur.rowcount > 0
+    except sqlite3.Error as exc:
+        logger.error('set_upload_stats_by_id() Database error: %s', exc)
+        return False
+    finally:
+        db.close()
 
 
 def get_fs_usage(base_path: Optional[Path] = None) -> dict:
@@ -614,6 +701,8 @@ def add_link_if_new(link_raw: str) -> tuple[bool, str, Optional[int]]:
             'add_link_if_new() Database error while adding link: %s', url,
         )
         return (False, url, None)
+    finally:
+        db.close()
 
 
 def log_download_error(
@@ -733,9 +822,230 @@ def main_loop() -> None:
         sleep(10)
 
 
+def _seeding_enabled(settings: dict) -> bool:
+    mode = settings.get('torrent_seed_mode') or 'off'
+    value = float(settings.get('torrent_seed_value') or 0)
+    return mode in ('ratio', 'time') and value > 0
+
+
+def _fetch_torrent_bytes(url: str) -> Optional[bytes]:
+    try:
+        response = requests.get(url, allow_redirects=True, timeout=30)
+        response.raise_for_status()
+        return response.content
+    except RequestException as exc:
+        logger.error(
+            '_fetch_torrent_bytes() Failed to fetch %s: %s', url, exc,
+        )
+        return None
+
+
+def _torrent_file_path(row_id: int) -> Path:
+    return TORRENTS_DIR / f'link-{row_id}.torrent'
+
+
+def _load_or_fetch_torrent_bytes(row_id: int, url: str) -> Optional[bytes]:
+    """Return .torrent bytes, using a cached copy under TORRENTS_DIR if
+    available. Fetches from URL and stages the file otherwise."""
+    path = _torrent_file_path(row_id)
+    if path.exists():
+        try:
+            return path.read_bytes()
+        except OSError as exc:
+            logger.warning(
+                '_load_or_fetch_torrent_bytes() Failed to read cached '
+                '%s: %s', path, exc,
+            )
+    payload = _fetch_torrent_bytes(url)
+    if payload is None:
+        return None
+    try:
+        tmp = path.with_suffix('.torrent.tmp')
+        tmp.write_bytes(payload)
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.warning(
+            '_load_or_fetch_torrent_bytes() Failed to stage %s: %s',
+            path, exc,
+        )
+    return payload
+
+
+def _delete_torrent_file(row_id: int) -> None:
+    path = _torrent_file_path(row_id)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning(
+            '_delete_torrent_file() Failed to remove %s: %s', path, exc,
+        )
+
+
+def _enqueue_torrent(
+    row: sqlite3.Row, client: 'torrent.Aria2Client', options: dict,
+) -> Optional[str]:
+    kind = row['kind']
+    url = row['url']
+    try:
+        if kind == torrent.KIND_MAGNET:
+            return client.add_uri(url, options)
+        payload = _load_or_fetch_torrent_bytes(row['id'], url)
+        if payload is None:
+            return None
+        return client.add_torrent(payload, options)
+    except torrent.Aria2Error as exc:
+        logger.error(
+            '_enqueue_torrent() RPC error for %s: %s', url, exc,
+        )
+        return None
+
+
+def _try_remove_result(client: 'torrent.Aria2Client', gid: str) -> None:
+    if not gid:
+        return
+    try:
+        client.remove_download_result(gid)
+    except torrent.Aria2Error:
+        pass
+
+
+def _apply_torrent_status(
+    row: sqlite3.Row, status: dict, seeding_enabled: bool,
+    client: 'torrent.Aria2Client',
+) -> None:
+    row_id = row['id']
+    aria_status = status.get('status', '')
+    raw_seeder = status.get('seeder')
+    if isinstance(raw_seeder, str):
+        runtime_seeder = raw_seeder.lower() == 'true'
+    else:
+        runtime_seeder = bool(raw_seeder)
+
+    # Row about to be deleted — skip progress writes.
+    if aria_status == 'complete' and (
+        not seeding_enabled or not runtime_seeder
+    ):
+        _try_remove_result(client, row['external_id'] or '')
+        _delete_torrent_file(row_id)
+        delete_by_id(row_id)
+        return
+
+    mapped = torrent.map_status(aria_status, seeding_enabled)
+    total = int(status.get('totalLength') or 0)
+    completed = int(status.get('completedLength') or 0)
+    speed = int(status.get('downloadSpeed') or 0)
+    connections = int(status.get('connections') or 0)
+    upload_speed = int(status.get('uploadSpeed') or 0)
+    uploaded = int(status.get('uploadLength') or 0)
+
+    if total > 0:
+        validated = _validate_size_bytes(total)
+        if validated is not None and validated != row['size_bytes']:
+            set_file_size_by_id(row_id, validated)
+        pct = max(0, min(int(completed / total * 100), 100))
+        if pct != row['pct_downloaded']:
+            set_pct_downloaded_by_id(row_id, pct)
+    if speed != (row['speed_bps'] or 0):
+        set_speed_bps_by_id(row_id, max(0, speed))
+    if connections != (row['connections'] or 0):
+        set_connections_by_id(row_id, max(0, connections))
+    row_keys = row.keys()
+    prev_up_speed = (
+        row['upload_speed_bps'] if 'upload_speed_bps' in row_keys else 0
+    )
+    prev_up_bytes = (
+        row['uploaded_bytes'] if 'uploaded_bytes' in row_keys else 0
+    )
+    if (
+        upload_speed != (prev_up_speed or 0)
+        or uploaded != (prev_up_bytes or 0)
+    ):
+        set_upload_stats_by_id(
+            row_id, max(0, upload_speed), max(0, uploaded),
+        )
+    # Don't clobber user-driven 'paused' status.
+    if mapped != row['status'] and row['status'] != 'paused':
+        set_status_downloaded_by_id(row_id, mapped)
+
+    if aria_status == 'error':
+        gid = row['external_id'] or ''
+        message = status.get('errorMessage', '') or 'Unknown error'
+        log_download_error(gid, row['url'], 'Torrent error', message)
+        _try_remove_result(client, gid)
+        _delete_torrent_file(row_id)
+
+
+def torrent_loop() -> None:
+    settings = get_settings()
+    if not settings.get('torrent_enabled'):
+        return
+
+    client = torrent.Aria2Client()
+    if not client.is_available():
+        return
+
+    seeding_enabled = _seeding_enabled(settings)
+    options = torrent.seed_options(
+        settings.get('torrent_seed_mode') or 'off',
+        float(settings.get('torrent_seed_value') or 0),
+    )
+
+    for row in fetch_active_torrents():
+        if not row['external_id']:
+            if row['status'] == 'paused':
+                continue
+            fs_usage = get_fs_usage()
+            if fs_usage['percent_free'] < 5:
+                set_status_downloaded_by_id(
+                    row_id=row['id'],
+                    new_status='space_waiting',
+                )
+                continue
+            gid = _enqueue_torrent(row, client, options)
+            if gid is None:
+                log_download_error(
+                    row['url'], row['url'],
+                    'Torrent error', 'Failed to enqueue torrent',
+                )
+                set_status_downloaded_by_id(row['id'], 'failed')
+                _delete_torrent_file(row['id'])
+                continue
+            set_external_id_by_id(row['id'], gid)
+            set_status_downloaded_by_id(row['id'], 'downloading')
+            continue
+        try:
+            status = client.tell_status(row['external_id'])
+        except torrent.Aria2Error as exc:
+            logger.warning(
+                'torrent_loop() tellStatus failed for GID %s: %s',
+                row['external_id'], exc,
+            )
+            continue
+        _apply_torrent_status(row, status, seeding_enabled, client)
+
+
+def torrent_worker(stop_event: threading.Event, interval: int = 3) -> None:
+    while not stop_event.is_set():
+        try:
+            torrent_loop()
+        except Exception as exc:  # keep the thread alive on unexpected errors
+            logger.error('torrent_worker() unhandled error: %s', exc)
+        stop_event.wait(interval)
+
+
 def main():
-    while True:
-        main_loop()
+    stop_event = threading.Event()
+    worker = threading.Thread(
+        target=torrent_worker, args=(stop_event,), daemon=True,
+    )
+    worker.start()
+    try:
+        while True:
+            main_loop()
+    finally:
+        stop_event.set()
 
 
 if __name__ == '__main__':
