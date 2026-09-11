@@ -139,3 +139,19 @@ content: >
   {% for i in range(count) %} 📄 {% endfor %} {% endif %}
 title: Files waiting for download
 ```
+
+## Third-party licenses
+
+This project is released under the [MIT License](LICENSE). Its Python
+dependencies are all permissively licensed (MIT, BSD, Apache-2.0, MPL-2.0 and
+ZPL-2.1) and ship their own license texts inside the image.
+
+The published Docker image also bundles unmodified Debian packages, including
+`ffmpeg`, `aria2` and `procps`, which are licensed under GPL-2+. Their full
+license texts are included in the image under
+`/usr/share/doc/<package>/copyright`, and the corresponding source is available
+from [sources.debian.org](https://sources.debian.org/).
+
+These programs are invoked as separate processes and are not linked into
+wsdownloader, so they do not affect the MIT licensing of this project's own
+code.
