@@ -560,9 +560,9 @@ pytest-mock==3.15.1 \
     --hash=sha256:0a25e2eb88fe5168d535041d09a4529a188176ae608a6d249ee65abc0949630d \
     --hash=sha256:1849a238f6f396da19762269de72cb1814ab44416fa73a8686deac10b0d87a0f
     # via -r dev.in
-python-discovery==1.5.1 \
-    --hash=sha256:ac07f44cade589d954e9d6a1e1468539fdddd2cf676beb51da73e0f156b7c932 \
-    --hash=sha256:e2ea8b884cd1701f386eda8cf327b87743f1dc21b7f784470799537d95635384
+python-discovery==1.6.1 \
+    --hash=sha256:cf87d3627dfb4412437fdd5b13eae402607722998d21567993aedbc59b23c15e \
+    --hash=sha256:d43fcdef879fe795352bd13ccf8d185ba5a9f86f36cfcd00529f596e737442b3
     # via virtualenv
 python-engineio==4.13.4 \
     --hash=sha256:272de73124e255d3d2bba6f86358c1a1ba618f938f337a0c868b60550fe38719 \
@@ -667,9 +667,9 @@ urllib3==2.8.0 \
     # via
     #   -r prod.txt
     #   requests
-virtualenv==21.7.1 \
-    --hash=sha256:6394973f990536e34c05157179146c020284c42fe01da1dfeb0ba16c345280d9 \
-    --hash=sha256:d0dbfaa5483487baea28d7210ef8d24c9d1bd0f10f449eeb215568825a9b334e
+virtualenv==21.7.13 \
+    --hash=sha256:0355558b6f33619aab31347e43643b0ebc97f61ea3acf617b2b69e1f8a843d11 \
+    --hash=sha256:1bea5af7463f59c4719db48fe739579a2a4f569c96f26c086edda85c96da9f59
     # via pre-commit
 werkzeug==3.1.8 \
     --hash=sha256:63a77fb8892bf28ebc3178683445222aa500e48ebad5ec77b0ad80f8726b1f50 \
