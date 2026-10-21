@@ -93,6 +93,16 @@ Features:
   - simply queuing the file using the WS [downloads list](https://webshare.cz/#/downloads) feature. Requires a WS login. If successfuly added to the local download queue, file is removed from the WS download queue.
 
 
+### Running in Docker
+A container started without `--user` fixes ownership of `/data` and then runs as `PUID:PGID` (env vars, default `1000:1000`). `/downloads` is never chown'ed. Passing `--user UID:GID` still works and skips this step. `--clear-groups` is used, so groups from `--group-add` are dropped. `PUID=0` keeps the legacy run-as-root behaviour.
+
+`/downloads` must be writable by `PUID:PGID`. If you previously ran without `--user`, it may hold root-owned files (including `.cache`); fix with `sudo chown -R 1000:1000 <downloads dir>` or set `-e PUID=0` to keep running as root.
+
+```
+docker run -d -e PUID=1000 -e PGID=1000 -v /path/downloads:/downloads -v /path/data:/data -p 5000:5000 spidermila/wsdownloader
+```
+
+
 ## Home Assistant Integration
 
 ### HA configuration in configuration.yaml

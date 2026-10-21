@@ -1,6 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Started as root (no --user): fix the data dir ownership, then re-exec as
+# PUID:PGID. PUID=0 keeps running as root. Never chown /downloads, it is the
+# user's media library.
+if [ "$(id -u)" = 0 ] && [ "${PUID:-1000}" != 0 ]; then
+  if [ -n "${WSD_PRIV_DROPPED:-}" ]; then
+    echo "ERROR: still uid 0 after dropping privileges (PUID=${PUID:-} is not a usable non-root uid)" >&2
+    exit 1
+  fi
+  PUID="${PUID:-1000}"
+  PGID="${PGID:-1000}"
+  case "$PUID$PGID" in
+    *[!0-9]*)
+      echo "ERROR: PUID/PGID must be numeric (got PUID=$PUID PGID=$PGID)" >&2
+      exit 1
+      ;;
+  esac
+  mkdir -p /data
+  chown -R "$PUID:$PGID" /data ||
+    echo "WARN: could not chown /data to $PUID:$PGID; continuing" >&2
+  export HOME=/tmp WSD_PRIV_DROPPED=1
+  exec setpriv --reuid="$PUID" --regid="$PGID" --clear-groups "$0" "$@"
+fi
+
 # Ensure paths exist
 mkdir -p /downloads /data
 
