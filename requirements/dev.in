@@ -8,3 +8,6 @@ pre-commit
 pytest
 pytest-cov
 pytest-mock
+
+# End-to-end UI tests (opt-in via RUN_E2E=1)
+playwright

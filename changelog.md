@@ -2,6 +2,13 @@
 
 Docker image changelog:
 
+## 0.8.0
+(released 21-Oct-2026)
+- Page footer shows the app version, linked to the GitHub project
+- Checkboxes in the queue and in the downloaded files list with a "Smazat vybrané" button to delete several items at once; selection survives live updates
+- On narrow screens the queue table hides the size and progress columns so long names fit; progress is shown under the status instead
+- Container started without `--user` no longer leaves root-owned files in `/data`: it fixes `/data` ownership and runs as `PUID`:`PGID` (default 1000:1000); `--user` still works (but fails if `/data` already holds root-owned files; start once without it to repair); `/downloads` is not chown'ed and must be writable by `PUID:PGID` (`sudo chown -R 1000:1000 <downloads dir>`, or `PUID=0` to keep running as root)
+
 ## 0.7.1
 (released 21-Oct-2026)
 - Magnet links no longer disappear from the list once their metadata is fetched; the row follows the actual download
