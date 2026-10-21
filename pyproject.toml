@@ -1,9 +1,10 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=app --cov=downloader --cov-report=term-missing -v"
+addopts = "--cov=app --cov=downloader --cov=torrent --cov-branch --cov-report=term-missing --cov-report=json -v"
 
 [tool.coverage.run]
-source = ["app", "downloader"]
+source = ["app", "downloader", "torrent"]
+branch = true
 omit = [
     "*/__pycache__/*",
 ]

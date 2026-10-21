@@ -1,0 +1,27 @@
+name: Tests
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+
+      - name: Install dependencies
+        run: pip install --require-hashes -r requirements/dev.txt
+
+      - name: Run tests
+        run: pytest
+
+      - name: Torrent coverage gate
+        run: python check_coverage.py origin/${{ github.base_ref || 'main' }}

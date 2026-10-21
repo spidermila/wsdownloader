@@ -264,9 +264,15 @@ class FakeClient:
         self.calls = []
         self.status_response = {}
         self.raise_on_status = False
+        self.status_exc = None
+        self.raise_on_remove_result = False
+        self.raise_on_force_remove = False
+        self.on_add = None
 
     def add_uri(self, uri, opts):
         self.calls.append(('add_uri', uri, opts))
+        if self.on_add:
+            self.on_add()
         return 'gid-uri'
 
     def add_torrent(self, data, opts):
@@ -275,6 +281,8 @@ class FakeClient:
 
     def tell_status(self, gid):
         self.calls.append(('tell_status', gid))
+        if self.status_exc:
+            raise self.status_exc
         if self.raise_on_status:
             from torrent import Aria2Error
             raise Aria2Error('boom')
@@ -282,6 +290,15 @@ class FakeClient:
 
     def remove_download_result(self, gid):
         self.calls.append(('remove_download_result', gid))
+        if self.raise_on_remove_result:
+            from torrent import Aria2Error
+            raise Aria2Error('boom')
+
+    def force_remove(self, gid):
+        self.calls.append(('force_remove', gid))
+        if self.raise_on_force_remove:
+            from torrent import Aria2Error
+            raise Aria2Error('boom')
 
     def is_available(self):
         return True
@@ -556,7 +573,7 @@ def test_torrent_loop_keeps_row_while_seeding(downloader_module, monkeypatch):
 
     client = FakeClient()
     client.status_response = {
-        'status': 'complete', 'totalLength': '10', 'completedLength': '10',
+        'status': 'active', 'totalLength': '10', 'completedLength': '10',
         'downloadSpeed': '0', 'seeder': 'true',
     }
     monkeypatch.setattr(
@@ -638,6 +655,7 @@ def test_torrent_loop_tolerates_tell_status_failure(
         downloader_module.torrent, 'Aria2Client', lambda *a, **kw: client,
     )
     downloader_module.torrent_loop()  # must not raise
+    assert _row(downloader_module, MAGNET)['external_id'] == 'gidX'
 
 
 def test_torrent_worker_stops_on_event(downloader_module, monkeypatch):
@@ -806,3 +824,407 @@ def test_main_starts_worker_and_stops_on_exception(
     with pytest.raises(SystemExit):
         downloader_module.main()
     assert call_count['n'] == 1
+
+
+GID_NOT_FOUND = "{'code': 1, 'message': 'GID 0123456789abcdef is not found'}"
+
+
+def _row(downloader_module, url):
+    conn = sqlite3.connect(downloader_module.DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        return conn.execute(
+            'SELECT * FROM links WHERE url = ?', (url,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def _patch_client(downloader_module, monkeypatch, client):
+    monkeypatch.setattr(
+        downloader_module.torrent, 'Aria2Client', lambda *a, **kw: client,
+    )
+
+
+def _apply(downloader_module, client, status, seeding=False):
+    row = downloader_module.fetch_active_torrents()[0]
+    downloader_module._apply_torrent_status(row, status, seeding, client)
+
+
+def test_apply_status_magnet_handoff_swaps_gid(downloader_module):
+    _seed_torrent_row(
+        downloader_module, MAGNET, 'magnet',
+        external_id='gidM', status='downloading',
+    )
+    row_id = _row(downloader_module, MAGNET)['id']
+    staged = downloader_module._torrent_file_path(row_id)
+    staged.write_bytes(b'stub')
+    client = FakeClient()
+
+    _apply(
+        downloader_module, client, {
+            'status': 'complete', 'followedBy': ['gidR'],
+            'totalLength': '99', 'completedLength': '99',
+        }, seeding=True,
+    )
+
+    row = _row(downloader_module, MAGNET)
+    assert row['external_id'] == 'gidR'
+    assert row['status'] == 'downloading'
+    assert not row['size_bytes']
+    assert not row['pct_downloaded']
+    assert ('remove_download_result', 'gidM') in client.calls
+    assert staged.exists()
+
+
+def test_apply_status_magnet_handoff_ignores_remove_result_error(
+    downloader_module,
+):
+    _seed_torrent_row(
+        downloader_module, MAGNET, 'magnet',
+        external_id='gidM', status='downloading',
+    )
+    client = FakeClient()
+    client.raise_on_remove_result = True
+
+    _apply(
+        downloader_module, client, {
+            'status': 'complete', 'followedBy': ['gidR'],
+        },
+    )
+    assert _row(downloader_module, MAGNET)['external_id'] == 'gidR'
+
+
+def test_apply_status_magnet_handoff_row_gone_discards_followup(
+    downloader_module,
+):
+    _seed_torrent_row(
+        downloader_module, MAGNET, 'magnet',
+        external_id='gidM', status='downloading',
+    )
+    row = downloader_module.fetch_active_torrents()[0]
+    staged = downloader_module._torrent_file_path(row['id'])
+    staged.write_bytes(b'stub')
+    downloader_module.delete_by_id(row['id'])
+    client = FakeClient()
+
+    downloader_module._apply_torrent_status(
+        row, {'status': 'complete', 'followedBy': ['gidR']}, False, client,
+    )
+
+    assert ('force_remove', 'gidR') in client.calls
+    assert ('remove_download_result', 'gidR') in client.calls
+    assert ('remove_download_result', 'gidM') in client.calls
+    assert not staged.exists()
+
+
+def test_apply_status_complete_deletes_even_with_seeding_enabled(
+    downloader_module,
+):
+    _seed_torrent_row(
+        downloader_module, MAGNET, 'magnet',
+        external_id='gidX', status='seeding',
+    )
+    client = FakeClient()
+    _apply(
+        downloader_module, client, {
+            'status': 'complete', 'followedBy': [],
+        }, seeding=True,
+    )
+    assert _row(downloader_module, MAGNET) is None
+    assert ('remove_download_result', 'gidX') in client.calls
+
+
+def test_apply_status_seeder_ignored_when_seeding_disabled(
+    downloader_module,
+):
+    _seed_torrent_row(
+        downloader_module, MAGNET, 'magnet',
+        external_id='gidX', status='downloading',
+    )
+    client = FakeClient()
+    _apply(
+        downloader_module, client, {
+            'status': 'active', 'seeder': True,
+        }, seeding=False,
+    )
+    assert _row(downloader_module, MAGNET)['status'] == 'downloading'
+
+
+def test_apply_status_error_overrides_paused(downloader_module):
+    _seed_torrent_row(
+        downloader_module, MAGNET, 'magnet',
+        external_id='gidX', status='paused',
+    )
+    row_id = _row(downloader_module, MAGNET)['id']
+    staged = downloader_module._torrent_file_path(row_id)
+    staged.write_bytes(b'stub')
+    client = FakeClient()
+
+    _apply(
+        downloader_module, client, {
+            'status': 'error', 'errorMessage': 'disk full',
+        },
+    )
+
+    assert _row(downloader_module, MAGNET)['status'] == 'failed'
+    assert not staged.exists()
+    assert ('remove_download_result', 'gidX') in client.calls
+    conn = sqlite3.connect(downloader_module.DB_PATH)
+    try:
+        err = conn.execute(
+            'SELECT error_message FROM download_errors WHERE file_id = ?',
+            ('gidX',),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert 'disk full' in err[0]
+
+
+def test_apply_status_error_without_message_uses_unknown(downloader_module):
+    _seed_torrent_row(
+        downloader_module, MAGNET, 'magnet',
+        external_id='gidX', status='downloading',
+    )
+    _apply(downloader_module, FakeClient(), {'status': 'error'})
+    conn = sqlite3.connect(downloader_module.DB_PATH)
+    try:
+        err = conn.execute(
+            'SELECT error_message FROM download_errors WHERE file_id = ?',
+            ('gidX',),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert 'Unknown error' in err[0]
+
+
+def test_apply_status_removed_marks_failed_without_error_log(
+    downloader_module,
+):
+    _seed_torrent_row(
+        downloader_module, MAGNET, 'magnet',
+        external_id='gidX', status='downloading',
+    )
+    row_id = _row(downloader_module, MAGNET)['id']
+    staged = downloader_module._torrent_file_path(row_id)
+    staged.write_bytes(b'stub')
+    client = FakeClient()
+
+    _apply(downloader_module, client, {'status': 'removed'})
+
+    assert _row(downloader_module, MAGNET)['status'] == 'failed'
+    assert not staged.exists()
+    assert ('remove_download_result', 'gidX') in client.calls
+    conn = sqlite3.connect(downloader_module.DB_PATH)
+    try:
+        n = conn.execute('SELECT COUNT(*) FROM download_errors').fetchone()
+    finally:
+        conn.close()
+    assert n[0] == 0
+
+
+def test_torrent_loop_clears_gid_when_not_found(
+    downloader_module, monkeypatch, caplog,
+):
+    import torrent
+    _seed_torrent_row(
+        downloader_module, MAGNET, 'magnet',
+        external_id='gidX', status='downloading',
+    )
+    _enable_torrents_in_db(downloader_module)
+    client = FakeClient()
+    client.status_exc = torrent.Aria2Error(GID_NOT_FOUND)
+    _patch_client(downloader_module, monkeypatch, client)
+
+    with caplog.at_level('INFO'):
+        downloader_module.torrent_loop()
+
+    row = _row(downloader_module, MAGNET)
+    assert row['external_id'] == ''
+    assert row['status'] == 'downloading'
+    assert not [r for r in caplog.records if r.levelname == 'WARNING']
+
+
+def test_torrent_loop_tolerates_other_aria2_error_with_warning(
+    downloader_module, monkeypatch, caplog,
+):
+    _seed_torrent_row(
+        downloader_module, MAGNET, 'magnet',
+        external_id='gidX', status='downloading',
+    )
+    _enable_torrents_in_db(downloader_module)
+    client = FakeClient()
+    client.raise_on_status = True
+    _patch_client(downloader_module, monkeypatch, client)
+
+    with caplog.at_level('WARNING'):
+        downloader_module.torrent_loop()
+
+    assert _row(downloader_module, MAGNET)['external_id'] == 'gidX'
+    assert any(r.levelname == 'WARNING' for r in caplog.records)
+
+
+def test_torrent_loop_enqueue_passes_check_integrity(
+    downloader_module, monkeypatch,
+):
+    _seed_torrent_row(downloader_module, MAGNET, 'magnet')
+    _enable_torrents_in_db(downloader_module)
+    client = FakeClient()
+    _patch_client(downloader_module, monkeypatch, client)
+
+    downloader_module.torrent_loop()
+
+    opts = client.calls[0][2]
+    assert opts['check-integrity'] == 'true'
+    assert opts['seed-time'] == '0'
+
+
+def test_torrent_loop_discards_enqueued_gid_when_row_deleted(
+    downloader_module, monkeypatch,
+):
+    _seed_torrent_row(downloader_module, MAGNET, 'magnet')
+    _enable_torrents_in_db(downloader_module)
+    row_id = _row(downloader_module, MAGNET)['id']
+    staged = downloader_module._torrent_file_path(row_id)
+    staged.write_bytes(b'stub')
+    client = FakeClient()
+    client.on_add = lambda: downloader_module.delete_by_id(row_id)
+    client.raise_on_force_remove = True
+    _patch_client(downloader_module, monkeypatch, client)
+
+    downloader_module.torrent_loop()
+
+    assert ('force_remove', 'gid-uri') in client.calls
+    assert ('remove_download_result', 'gid-uri') in client.calls
+    assert not staged.exists()
+    assert _row(downloader_module, MAGNET) is None
+
+
+def test_torrent_loop_enqueues_after_lost_gid_only_once(
+    downloader_module, monkeypatch,
+):
+    _seed_torrent_row(
+        downloader_module, TORRENT_URL, 'torrent',
+        external_id='', status='downloading',
+    )
+    _enable_torrents_in_db(downloader_module)
+    row_id = _row(downloader_module, TORRENT_URL)['id']
+    downloader_module._torrent_file_path(row_id).write_bytes(b'bytes')
+    client = FakeClient()
+    _patch_client(downloader_module, monkeypatch, client)
+
+    downloader_module.torrent_loop()
+    downloader_module.torrent_loop()
+
+    adds = [c for c in client.calls if c[0] == 'add_torrent']
+    assert len(adds) == 1
+    assert _row(downloader_module, TORRENT_URL)['external_id'] == (
+        'gid-torrent'
+    )
+
+
+def test_torrent_loop_parks_row_when_disk_low(downloader_module, monkeypatch):
+    _seed_torrent_row(downloader_module, MAGNET, 'magnet')
+    _enable_torrents_in_db(downloader_module)
+    monkeypatch.setattr(
+        downloader_module, 'get_fs_usage', lambda: {'percent_free': 1.0},
+    )
+    client = FakeClient()
+    _patch_client(downloader_module, monkeypatch, client)
+
+    downloader_module.torrent_loop()
+
+    assert _row(downloader_module, MAGNET)['status'] == 'space_waiting'
+    assert not [c for c in client.calls if c[0].startswith('add')]
+
+
+def test_get_settings_defaults_when_row_missing(downloader_module):
+    conn = sqlite3.connect(downloader_module.DB_PATH)
+    try:
+        conn.execute('DELETE FROM settings')
+        conn.commit()
+    finally:
+        conn.close()
+    assert downloader_module.get_settings()['torrent_seed_mode'] == 'off'
+
+
+def test_load_torrent_bytes_unreadable_cache_refetches(
+    downloader_module, monkeypatch,
+):
+    path = downloader_module._torrent_file_path(5)
+    path.mkdir()
+    monkeypatch.setattr(
+        downloader_module, '_fetch_torrent_bytes', lambda url: b'fresh',
+    )
+    # The cache path is a directory: read fails, staging the copy fails too,
+    # but the fetched payload is still returned.
+    assert downloader_module._load_or_fetch_torrent_bytes(
+        5, TORRENT_URL,
+    ) == b'fresh'
+
+
+def test_load_torrent_bytes_fetch_failure_returns_none(
+    downloader_module, monkeypatch,
+):
+    monkeypatch.setattr(
+        downloader_module, '_fetch_torrent_bytes', lambda url: None,
+    )
+    assert downloader_module._load_or_fetch_torrent_bytes(
+        6, TORRENT_URL,
+    ) is None
+
+
+def test_delete_torrent_file_survives_os_error(downloader_module):
+    path = downloader_module._torrent_file_path(8)
+    path.mkdir()
+    (path / 'child').write_bytes(b'x')
+    downloader_module._delete_torrent_file(8)
+    assert path.exists()
+
+
+def test_enqueue_torrent_rpc_error_returns_none(downloader_module):
+    import torrent
+    _seed_torrent_row(downloader_module, MAGNET, 'magnet')
+    row = downloader_module.fetch_active_torrents()[0]
+
+    class Bad(FakeClient):
+        def add_uri(self, uri, opts):
+            raise torrent.Aria2Error('rpc down')
+
+    assert downloader_module._enqueue_torrent(row, Bad(), {}) is None
+
+
+def test_apply_status_writes_progress_only_on_change(downloader_module):
+    _seed_torrent_row(
+        downloader_module, MAGNET, 'magnet',
+        external_id='gidX', status='downloading',
+    )
+    client = FakeClient()
+    status = {
+        'status': 'active', 'totalLength': '1000', 'completedLength': '500',
+        'downloadSpeed': '10', 'connections': '3', 'uploadSpeed': '4',
+        'uploadLength': '77',
+    }
+    _apply(downloader_module, client, status)
+    row = _row(downloader_module, MAGNET)
+    assert (row['size_bytes'], row['pct_downloaded']) == (1000, 50)
+    assert (row['speed_bps'], row['connections']) == (10, 3)
+    assert (row['upload_speed_bps'], row['uploaded_bytes']) == (4, 77)
+
+    # Unchanged snapshot: nothing to write, still fine.
+    _apply(downloader_module, client, status)
+    assert _row(downloader_module, MAGNET)['pct_downloaded'] == 50
+
+
+def test_apply_status_ignores_out_of_range_size(downloader_module):
+    _seed_torrent_row(
+        downloader_module, MAGNET, 'magnet',
+        external_id='gidX', status='downloading',
+    )
+    _apply(
+        downloader_module, FakeClient(), {
+            'status': 'active', 'totalLength': str(2 ** 80),
+            'completedLength': '0',
+        },
+    )
+    assert not _row(downloader_module, MAGNET)['size_bytes']

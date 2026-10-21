@@ -38,3 +38,12 @@ repos:
         args:
         - --explicit-package-bases
         - --ignore-missing-imports
+-   repo: local
+    hooks:
+    -   id: torrent-coverage
+        name: tests + torrent coverage gate
+        language: system
+        entry: sh -c 'venv/bin/python -m pytest -q && venv/bin/python check_coverage.py'
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

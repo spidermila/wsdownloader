@@ -2,7 +2,8 @@
 Shared pytest fixtures.
 
 app.py and downloader.py both read their DATA_DIR/DOWNLOADS_DIR/DB_PATH
-configuration from environment variables at *import time*. To keep tests
+configuration from environment variables at *import time* (torrent.py reads
+DATA_DIR for its default RPC secret file the same way). To keep tests
 isolated from each other and from a developer's real ./data directory,
 these fixtures point those env vars at a fresh temporary directory and
 then (re)import the modules so they pick up the new paths.
@@ -23,6 +24,10 @@ def temp_env(tmp_path, monkeypatch):
     monkeypatch.setenv('DOWNLOADS_DIR', str(downloads_dir))
     monkeypatch.setenv('DB_PATH', str(db_path))
     monkeypatch.setenv('FLASK_SECRET_KEY', 'test-secret-key')
+    monkeypatch.delenv('ARIA2_RPC_SECRET', raising=False)
+
+    import torrent
+    importlib.reload(torrent)
 
     return {
         'data_dir': data_dir,
@@ -32,10 +37,12 @@ def temp_env(tmp_path, monkeypatch):
 
 
 @pytest.fixture()
-def app_module(temp_env):
+def app_module(temp_env, monkeypatch):
     """A freshly (re)imported app.py bound to the isolated temp DB/paths."""
     import app as app_mod
     importlib.reload(app_mod)
+    # before_request would spawn a monitor thread that outlives the test
+    monkeypatch.setattr(app_mod, 'start_monitor', lambda: None)
     app_mod.init_db()
     return app_mod
 

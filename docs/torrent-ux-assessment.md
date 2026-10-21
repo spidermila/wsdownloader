@@ -14,8 +14,8 @@ _Assessment date: 2026-08-26 · branch: `feat/torrent-aria2c`_
 | **Trackers** | Included in `tellStatus` (`bittorrent.announceList`); can add via `change_option` (`bt-tracker`) | Not surfaced | Users can't see why a torrent stalls |
 | **Peers view** | `getPeers` (already wrapped `torrent.py:134`) | Shown in details page | ✓ present, but no auto-refresh, no ban/prefer |
 | **Global stats** | `getGlobalStat` (total up/down speed, active/waiting/stopped counts) | Not called | Missing header dashboard |
-| **Magnet → metadata persistence** | `bt-save-metadata=true` writes .torrent when metadata resolved | Disabled (`entrypoint.sh`) | If aria2 restarts mid-magnet, metadata is lost |
-| **Session survival** | `--save-session` + `--input-file` (already used) but combined with `bt-save-metadata=false` breaks magnet resume | Partial | Restart of container loses in-flight magnets |
+| **Magnet → metadata persistence** | `bt-save-metadata=true` writes .torrent when metadata resolved | Disabled (`bt-save-metadata=false`, commit 553c0f9) | aria2 wrote stray `.torrent` files into the downloads dir; the app stages `.torrent` files under `DATA_DIR/torrents` itself. After an aria2 restart the app re-adds the torrent from the staged file or magnet URL |
+| **Session survival** | Not used. `--save-session`/`--input-file` were removed because a restored session collides with the app's own re-enqueue (errorCode 12, see deep-dive §13) | None in aria2 | The app re-adds torrents after an aria2 restart (`torrent_loop`) |
 | **Force vs. graceful removal** | `remove` (graceful — announces stop to tracker) vs. `forceRemove` | Uses `forceRemove` (`torrent.py:124`) | Bad tracker etiquette; private trackers may penalise |
 | **HTTP downloads via aria2** | Aria2 handles HTTP with multi-connection, resume, pause | wsdownloader uses its own downloader for HTTP | Two code paths; HTTP has no pause/resume/multi-connection |
 | **ETA** | Computable from `totalLength`/`completedLength`/`downloadSpeed` | Not shown | Small win |
@@ -37,7 +37,7 @@ _Assessment date: 2026-08-26 · branch: `feat/torrent-aria2c`_
 3. **Show ETA + upload ratio per row** — compute `(totalLength-completedLength)/downloadSpeed` and `uploadedBytes/totalLength` in `link_to_dict` (`app.py:1567`). Pure display change.
 4. **Auto-refresh details page** — add a small JS `setInterval` hitting a JSON endpoint (`/torrent/details.json?gid=…`) every 3-5 s. Peers/speeds update without reload.
 5. **Graceful `remove` instead of `forceRemove`** — `torrent.py:124`. Change default; keep force as fallback if graceful times out. Better citizen on private trackers.
-6. **Enable `bt-save-metadata=true`** — `entrypoint.sh:31`. Combined with existing `save-session`, magnets survive container restarts. Cost: a few extra KB in `DATA_DIR`.
+6. **~~Enable `bt-save-metadata=true`~~ (reverted)** — it was implemented, then reverted in 553c0f9 (`--bt-save-metadata=false`) because aria2 wrote stray `.torrent` files into the downloads dir. Restart recovery is done by the app instead (staged `.torrent` / magnet URL re-enqueued, see deep-dive §13).
 7. **Bulk actions** — "Pause all torrents" / "Resume all" buttons. Iterate DB rows or call `aria2.pauseAll`/`unpauseAll` (also unwrapped — add to `Aria2Client`).
 
 ### Medium impact
@@ -61,7 +61,7 @@ _Assessment date: 2026-08-26 · branch: `feat/torrent-aria2c`_
 
 - [x] #1 Global speed limits — implemented
 - [x] #5 Graceful remove — implemented
-- [x] #6 `bt-save-metadata=true` — implemented
+- [ ] #6 reverted: `bt-save-metadata=false` (553c0f9), see deep-dive §13
 - [x] #7 Bulk pause/resume — implemented
 - [x] #8 File selection UI — implemented
 - [ ] Others — deferred

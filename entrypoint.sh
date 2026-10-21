@@ -18,9 +18,6 @@ export ARIA2_RPC_SECRET
 : "${ARIA2_LISTEN_PORT:=51413}"
 : "${ARIA2_ENABLE_DHT:=true}"
 
-# aria2 refuses to start if --input-file points at a missing path.
-touch "${DATA_DIR:-/data}/aria2.session"
-
 # Persisted global speed limits (bytes/s, 0 = unlimited) from the settings
 # table; read once at startup and passed to aria2. Runtime changes are pushed
 # via aria2.changeGlobalOption by app.py.
@@ -47,6 +44,9 @@ PY
 )"
 export ARIA2_MAX_DL_BPS ARIA2_MAX_UL_BPS
 
+# No --save-session/--input-file on purpose: downloader.py re-adds torrents
+# after an aria2 restart, and a restored session would collide with that
+# (errorCode 12, InfoHash already registered).
 start_aria2() {
   aria2c \
     --enable-rpc=true \
@@ -56,9 +56,6 @@ start_aria2() {
     --dir="${DOWNLOADS_DIR:-/downloads}" \
     --continue=true \
     --auto-file-renaming=false \
-    --save-session="${DATA_DIR:-/data}/aria2.session" \
-    --save-session-interval=30 \
-    --input-file="${DATA_DIR:-/data}/aria2.session" \
     --bt-save-metadata=false \
     --rpc-save-upload-metadata=false \
     --enable-dht="${ARIA2_ENABLE_DHT}" \
@@ -113,7 +110,6 @@ trap term_handler SIGTERM SIGINT
 # tolerates a brief RPC outage).
 restart_aria2() {
   echo "aria2 stopped; restarting..."
-  touch "${DATA_DIR:-/data}/aria2.session"
   start_aria2
 }
 

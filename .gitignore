@@ -10,3 +10,5 @@ dev_sync.sh
 .coverage
 .pytest_cache/
 htmlcov/
+.dev-team/
+coverage.json
