@@ -5,7 +5,6 @@ import os
 import secrets
 from pathlib import Path
 from typing import Any
-from typing import Optional
 from urllib.parse import urlparse
 
 import requests
@@ -46,7 +45,7 @@ def classify(url: str) -> str:
     return KIND_HTTP
 
 
-def read_or_create_secret(path: Optional[Path] = None) -> str:
+def read_or_create_secret(path: Path | None = None) -> str:
     """Return aria2 RPC secret, generating and persisting one if missing."""
     if path is None:
         path = DEFAULT_SECRET_FILE
@@ -74,7 +73,7 @@ class Aria2Client:
     def __init__(
         self,
         rpc_url: str = DEFAULT_RPC_URL,
-        secret: Optional[str] = None,
+        secret: str | None = None,
         timeout: float = 5.0,
     ) -> None:
         self.rpc_url = rpc_url
@@ -102,16 +101,16 @@ class Aria2Client:
             raise Aria2Error(str(data['error']))
         return data.get('result')
 
-    def add_uri(self, uri: str, options: Optional[dict] = None) -> str:
+    def add_uri(self, uri: str, options: dict | None = None) -> str:
         return self._call('aria2.addUri', [uri], options or {})
 
     def add_torrent(
-        self, torrent_bytes: bytes, options: Optional[dict] = None,
+        self, torrent_bytes: bytes, options: dict | None = None,
     ) -> str:
         encoded = base64.b64encode(torrent_bytes).decode('ascii')
         return self._call('aria2.addTorrent', encoded, [], options or {})
 
-    def tell_status(self, gid: str, keys: Optional[list[str]] = None) -> dict:
+    def tell_status(self, gid: str, keys: list[str] | None = None) -> dict:
         if keys is None:
             keys = [
                 'status', 'totalLength', 'completedLength', 'downloadSpeed',
@@ -206,7 +205,7 @@ def global_limit_options(dl_bps: int, ul_bps: int) -> dict:
 
 
 def apply_global_limits(
-    client: 'Aria2Client', dl_bps: int, ul_bps: int,
+    client: Aria2Client, dl_bps: int, ul_bps: int,
 ) -> bool:
     """Push overall dl/ul limits to aria2. Returns True on success."""
     try:

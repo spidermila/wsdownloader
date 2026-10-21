@@ -16,7 +16,6 @@ from pathlib import Path
 from threading import Lock
 from threading import Thread
 from time import sleep
-from typing import Optional
 from urllib.parse import parse_qsl
 from urllib.parse import urlparse
 
@@ -95,7 +94,7 @@ BASE_URL = 'https://webshare.cz/api/'
 MAX_SIZE_BYTES = 2 ** 63 - 1
 
 
-def _validate_size_bytes(size_bytes: int) -> Optional[int]:
+def _validate_size_bytes(size_bytes: int) -> int | None:
     """Return size_bytes if it's a plausible, storable file size, else None."""
     if size_bytes < 0 or size_bytes > MAX_SIZE_BYTES:
         logger.warning(
@@ -127,7 +126,7 @@ class Link:
         self.upload_speed_bps = 0
         self.uploaded_bytes = 0
         self.kind = torrent.KIND_HTTP
-        self.external_id: Optional[str] = None
+        self.external_id: str | None = None
 
     def get_file_name(self) -> str:
         if self.kind == torrent.KIND_MAGNET:
@@ -602,7 +601,7 @@ def validate_url(url) -> str:
     return 'ok'
 
 
-def test_url(url: str) -> tuple[bool, Optional[int]]:
+def test_url(url: str) -> tuple[bool, int | None]:
     """
     Probe a URL with a HEAD request. Returns whether it is reachable and,
     when available, its size in bytes (from the Content-Length header).
@@ -625,7 +624,7 @@ def test_url(url: str) -> tuple[bool, Optional[int]]:
 
 def add_link_if_new(
     link_raw: str, kind: str = torrent.KIND_HTTP,
-) -> tuple[bool, str, Optional[int]]:
+) -> tuple[bool, str, int | None]:
     url = (link_raw or '').strip()
     if not url:
         return (False, '', None)
@@ -700,7 +699,7 @@ def _human_speed(bytes_per_sec: int) -> str:
     return f"{kbps / 1024:.1f} MB/s"
 
 
-def get_fs_usage(base_path: Optional[Path] = None) -> dict:
+def get_fs_usage(base_path: Path | None = None) -> dict:
     if base_path is None:
         base_path = DOWNLOADS_PATH
     try:
@@ -1981,7 +1980,7 @@ def _get_video_pix_fmt(candidate) -> str:
 _HLS_SEGMENT_TIME = 4  # seconds per HLS segment
 
 
-def _get_video_duration(candidate: Path) -> Optional[float]:
+def _get_video_duration(candidate: Path) -> float | None:
     """Return video duration in seconds via ffprobe, or None on error."""
     try:
         result = subprocess.run(
