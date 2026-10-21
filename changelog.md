@@ -2,6 +2,18 @@
 
 Docker image changelog:
 
+## 0.7.0
+(released 21-Oct-2026)
+- Torrent support (opt-in in settings): paste a `magnet:` link or `.torrent` URL into the same input as regular links; downloads run through a bundled aria2c
+- Optional seeding after a torrent finishes, by ratio or by time; only torrent downloads are ever shared, never HTTP/Webshare ones
+- Torrent rows show download and upload speed, active connections and ratio; torrents can be paused, resumed, or stopped from seeding
+- Per-torrent details page with files, peers and raw aria2 status, plus a choice of which files inside a torrent to download
+- Global torrent download/upload speed limits and pause-all / resume-all actions
+- `.torrent` files are kept under the data directory and cleaned up automatically, so they no longer appear among your downloads
+- Fixed HTTP downloads waiting for free disk space never resuming after space was freed
+- Torrent peers listen on port 51413 (override with `ARIA2_LISTEN_PORT`); publish it with `-p 51413:51413/tcp -p 51413:51413/udp` for incoming connections
+- Base image moved to Python 3.14 and all dependencies updated to their latest versions, including security fixes in certifi, urllib3 and Werkzeug
+
 ## 0.6.0
 (released 15-Aug-2026)
 - Show current download speed (KB/s or MB/s, unit chosen automatically) next to the progress percentage while a file is downloading
