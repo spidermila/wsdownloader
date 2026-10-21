@@ -2,6 +2,16 @@
 
 Docker image changelog:
 
+## 0.7.1
+(released 21-Oct-2026)
+- Magnet links no longer disappear from the list once their metadata is fetched; the row follows the actual download
+- Torrents recover after aria2 restarts: interrupted downloads resume and finished ones are verified against the files on disk instead of failing or downloading again
+- Seeding status is now shown correctly while a torrent is seeding
+- Paused torrents can be resumed after an aria2 restart, and "Pause all" also pauses torrents that have not started yet
+- Stopping seeding also removes the stored `.torrent` file; the torrent details page handles torrents aria2 no longer knows about
+- Invalid or unreachable links no longer cause a server error, and a Webshare outage no longer logs you out
+- Network requests to Webshare and to added links now time out after 30 seconds instead of hanging
+
 ## 0.7.0
 (released 21-Oct-2026)
 - Torrent support (opt-in in settings): paste a `magnet:` link or `.torrent` URL into the same input as regular links; downloads run through a bundled aria2c
