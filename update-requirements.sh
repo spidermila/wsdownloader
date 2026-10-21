@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Recompile requirements/*.txt from requirements/*.in using Python 3.13 (matches Docker).
+# Recompile requirements/*.txt from requirements/*.in using Python 3.14 (matches Docker).
 # Pass --upgrade to bump all packages to the latest compatible versions.
 # Without --upgrade, versions are kept stable unless constrained deps force a change.
 #
@@ -10,7 +10,7 @@ set -euo pipefail
 #   ./update-requirements.sh --upgrade # recompile and bump all to latest
 
 UPGRADE_FLAG="${1:-}"
-PYTHON_IMAGE="python:3.13-slim"
+PYTHON_IMAGE="python:3.14-slim"
 REQ_DIR="$(cd "$(dirname "$0")/requirements" && pwd)"
 
 # Extract "lowercase_name version" pairs from a compiled requirements file
