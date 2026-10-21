@@ -2,6 +2,7 @@
 import base64
 import logging
 import os
+import re
 import secrets
 from pathlib import Path
 from typing import Any
@@ -50,11 +51,15 @@ def read_or_create_secret(path: Path | None = None) -> str:
     if path is None:
         path = DEFAULT_SECRET_FILE
     if path.exists():
-        return path.read_text().strip()
+        token = path.read_text().strip()
+        if token:
+            return token
+        path.unlink()
     path.parent.mkdir(parents=True, exist_ok=True)
     token = secrets.token_hex(32)
-    path.write_text(token)
-    os.chmod(path, 0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as fh:
+        fh.write(token)
     return token
 
 
@@ -67,6 +72,14 @@ def _get_secret() -> str:
 
 class Aria2Error(Exception):
     pass
+
+
+_GID_NOT_FOUND_RE = re.compile(r'\bGID [0-9a-fA-F]+ is not found\b')
+
+
+def is_gid_not_found(exc: Exception) -> bool:
+    """True when aria2 reports the GID as unknown (restart lost it)."""
+    return bool(_GID_NOT_FOUND_RE.search(str(exc)))
 
 
 class Aria2Client:
@@ -116,6 +129,7 @@ class Aria2Client:
                 'status', 'totalLength', 'completedLength', 'downloadSpeed',
                 'uploadSpeed', 'uploadLength', 'connections', 'files',
                 'bittorrent', 'errorCode', 'errorMessage', 'seeder',
+                'followedBy',
             ]
         return self._call('aria2.tellStatus', gid, keys)
 
@@ -189,8 +203,9 @@ def seed_options(mode: str, value: float) -> dict:
 
 
 def map_status(aria_status: str, seeding_enabled: bool) -> str:
-    """Map aria2 status string to the app's status vocabulary."""
-    if aria_status == 'complete' and seeding_enabled:
+    """Map aria2 status string to the app's status vocabulary.
+    aria2 reports a seeding torrent as active with seeder=true."""
+    if aria_status == 'active' and seeding_enabled:
         return 'seeding'
     return STATUS_MAP.get(aria_status, 'new')
 

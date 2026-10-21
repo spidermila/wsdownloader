@@ -1,6 +1,9 @@
 """Tests for the torrent code paths in app.py (issue #39)."""
+import sqlite3
 
+import pytest
 
+TORRENT_URL = 'https://example.com/x.torrent'
 MAGNET = (
     'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567'
     '&dn=example'
@@ -352,9 +355,10 @@ def test_pause_torrent_rejects_missing_url(client):
 
 def test_pause_torrent_rejects_before_enqueue(app_module, client):
     _enable_torrents(app_module)
-    _make_torrent_row(app_module, external_id=None)
+    _make_torrent_row(app_module, external_id='', status='downloading')
     resp = client.post('/torrent/pause', data={'url': MAGNET})
     assert resp.status_code == 302
+    assert _status(app_module) == 'downloading'
 
 
 def test_pause_torrent_handles_aria_error(app_module, client, monkeypatch):
@@ -961,3 +965,590 @@ def test_select_files_rejects_empty_selection(
     monkeypatch.setattr(app_module.torrent, 'Aria2Client', FakeClient)
     resp = client.post('/torrent/select-files', data={'url': MAGNET})
     assert resp.status_code == 302
+
+
+GID_NOT_FOUND = "{'code': 1, 'message': 'GID 0123456789abcdef is not found'}"
+OTHER = MAGNET.replace('0123456789abcdef' * 2, 'b' * 32)
+HTTP_URL = 'https://example.com/x.mp4'
+
+
+def _status(app_module, url=MAGNET):
+    with app_module.app.app_context():
+        row = app_module.get_db().execute(
+            'SELECT status FROM links WHERE url = ?', (url,),
+        ).fetchone()
+    return row['status'] if row else None
+
+
+def _forbid_client(app_module, monkeypatch):
+    def boom(*a, **kw):
+        raise AssertionError('aria2 must not be contacted')
+
+    monkeypatch.setattr(app_module.torrent, 'Aria2Client', boom)
+
+
+def _flashes(client):
+    with client.session_transaction() as sess:
+        return [m for _cat, m in sess.get('_flashes', [])]
+
+
+def _http_row(app_module, status='downloading'):
+    with app_module.app.app_context():
+        app_module.add_link_if_new(HTTP_URL)
+        db = app_module.get_db()
+        db.execute(
+            'UPDATE links SET status = ? WHERE url = ?', (status, HTTP_URL),
+        )
+        db.commit()
+
+
+# --- FR-2 resume with lost / empty GID ---------------------------------
+
+@pytest.mark.parametrize('gid', ['', None])
+def test_resume_torrent_empty_gid_sets_downloading(
+    app_module, client, monkeypatch, gid,
+):
+    _make_torrent_row(app_module, external_id=gid, status='paused')
+    _forbid_client(app_module, monkeypatch)
+    resp = client.post('/torrent/resume', data={'url': MAGNET})
+    assert resp.status_code == 302
+    assert _status(app_module) == 'downloading'
+    assert _flashes(client) == ['Torrent bude znovu přidán do aria2.']
+
+
+def test_resume_torrent_lost_gid_sets_downloading(
+    app_module, client, monkeypatch,
+):
+    _make_torrent_row(app_module, status='paused')
+
+    class Lost:
+        def unpause(self, gid):
+            raise app_module.torrent.Aria2Error(GID_NOT_FOUND)
+
+    monkeypatch.setattr(
+        app_module.torrent, 'Aria2Client', lambda *a, **kw: Lost(),
+    )
+    client.post('/torrent/resume', data={'url': MAGNET})
+    assert _status(app_module) == 'downloading'
+
+
+def test_resume_lost_gid_then_loop_reenqueues_once(
+    app_module, client, downloader_module, monkeypatch,
+):
+    _make_torrent_row(
+        app_module, url=TORRENT_URL, kind='torrent', external_id='',
+        status='paused',
+    )
+    _enable_torrents(app_module)
+    with app_module.app.app_context():
+        row_id = app_module.get_db().execute(
+            'SELECT id FROM links WHERE url = ?', (TORRENT_URL,),
+        ).fetchone()['id']
+    downloader_module._torrent_file_path(row_id).write_bytes(b'bytes')
+
+    adds = []
+
+    class Aria:
+        def is_available(self):
+            return True
+
+        def add_torrent(self, data, opts):
+            adds.append(data)
+            return 'newgid'
+
+        def tell_status(self, gid):
+            return {'status': 'active'}
+
+    monkeypatch.setattr(
+        downloader_module.torrent, 'Aria2Client', lambda *a, **kw: Aria(),
+    )
+    downloader_module.torrent_loop()
+    assert adds == []
+    client.post('/torrent/resume', data={'url': TORRENT_URL})
+    downloader_module.torrent_loop()
+    downloader_module.torrent_loop()
+    assert adds == [b'bytes']
+    conn = sqlite3.connect(downloader_module.DB_PATH)
+    try:
+        gid = conn.execute(
+            'SELECT external_id FROM links WHERE id = ?', (row_id,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert gid == 'newgid'
+
+
+def test_resume_torrent_rejects_http(app_module, client):
+    _http_row(app_module)
+    client.post('/torrent/resume', data={'url': HTTP_URL})
+    assert _flashes(client) == ['Není to torrent.']
+
+
+# --- FR-7 details with lost / empty GID --------------------------------
+
+def test_torrent_details_lost_gid_renders_200(
+    app_module, client, monkeypatch,
+):
+    _make_torrent_row(app_module)
+
+    class Lost:
+        def tell_status(self, gid):
+            raise app_module.torrent.Aria2Error(GID_NOT_FOUND)
+
+    monkeypatch.setattr(
+        app_module.torrent, 'Aria2Client', lambda *a, **kw: Lost(),
+    )
+    resp = client.get('/torrent/details', query_string={'url': MAGNET})
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert 'bude automaticky znovu přidán' in body
+    assert "'code': 1" not in body
+
+
+# --- FR-13 / AC-12 stop seeding ----------------------------------------
+
+def test_stop_seeding_deletes_staged_file(app_module, client, monkeypatch):
+    _make_torrent_row(app_module, status='seeding')
+    with app_module.app.app_context():
+        row_id = app_module.get_db().execute(
+            'SELECT id FROM links WHERE url = ?', (MAGNET,),
+        ).fetchone()['id']
+    staged = app_module.TORRENTS_DIR / f'link-{row_id}.torrent'
+    staged.write_bytes(b'x')
+    emitted = []
+    monkeypatch.setattr(
+        app_module.socketio, 'emit', lambda *a, **kw: emitted.append(a),
+    )
+    monkeypatch.setattr(
+        app_module.torrent, 'Aria2Client', lambda *a, **kw: _AriaStub(),
+    )
+    client.post('/torrent/stop-seeding', data={'url': MAGNET})
+    assert not staged.exists()
+    assert _status(app_module) is None
+    assert emitted == [('link_deleted', {'url': MAGNET})]
+
+
+def test_stop_seeding_keeps_row_and_file_on_remove_failure(
+    app_module, client, monkeypatch,
+):
+    _make_torrent_row(app_module, status='seeding')
+    with app_module.app.app_context():
+        row_id = app_module.get_db().execute(
+            'SELECT id FROM links WHERE url = ?', (MAGNET,),
+        ).fetchone()['id']
+    staged = app_module.TORRENTS_DIR / f'link-{row_id}.torrent'
+    staged.write_bytes(b'x')
+    monkeypatch.setattr(
+        app_module, '_remove_from_aria2', lambda gid: False,
+    )
+    client.post('/torrent/stop-seeding', data={'url': MAGNET})
+    assert staged.exists()
+    assert _status(app_module) == 'seeding'
+
+
+# --- AC-8 _remove_from_aria2 -------------------------------------------
+
+class _RemoveClient:
+    def __init__(self, app_module, remove=None, force=None, result=None):
+        self.torrent = app_module.torrent
+        self.remove_exc = remove
+        self.force_exc = force
+        self.result_exc = result
+        self.calls = []
+
+    def _maybe(self, name, exc):
+        self.calls.append(name)
+        if exc:
+            raise self.torrent.Aria2Error(exc)
+
+    def remove(self, gid):
+        self._maybe('remove', self.remove_exc)
+
+    def force_remove(self, gid):
+        self._maybe('force_remove', self.force_exc)
+
+    def remove_download_result(self, gid):
+        self._maybe('remove_result', self.result_exc)
+
+
+def _use(app_module, monkeypatch, stub):
+    monkeypatch.setattr(
+        app_module.torrent, 'Aria2Client', lambda *a, **kw: stub,
+    )
+
+
+def test_remove_force_not_found_returns_true(app_module, monkeypatch):
+    stub = _RemoveClient(app_module, remove='busy', force=GID_NOT_FOUND)
+    _use(app_module, monkeypatch, stub)
+    assert app_module._remove_from_aria2('gidA') is True
+    assert stub.calls == ['remove', 'force_remove']
+
+
+def test_remove_graceful_and_force_not_found(app_module, monkeypatch):
+    stub = _RemoveClient(
+        app_module, remove=GID_NOT_FOUND, force=GID_NOT_FOUND,
+    )
+    _use(app_module, monkeypatch, stub)
+    assert app_module._remove_from_aria2('gidA') is True
+
+
+def test_remove_force_other_error_returns_false_and_route_keeps_row(
+    app_module, client, monkeypatch,
+):
+    _make_torrent_row(app_module)
+    stub = _RemoveClient(app_module, remove='busy', force='still busy')
+    _use(app_module, monkeypatch, stub)
+    assert app_module._remove_from_aria2('gidA') is False
+    client.post('/delete', data={'url': MAGNET})
+    assert _status(app_module) == 'downloading'
+    assert 'Nepodařilo se odebrat torrent z aria2. Zkuste to znovu.' in (
+        _flashes(client)
+    )
+
+
+def test_remove_ignores_remove_result_error(app_module, monkeypatch):
+    stub = _RemoveClient(app_module, result='gone')
+    _use(app_module, monkeypatch, stub)
+    assert app_module._remove_from_aria2('gidA') is True
+    assert stub.calls == ['remove', 'remove_result']
+
+
+def test_remove_empty_id_creates_no_client(app_module, monkeypatch):
+    _forbid_client(app_module, monkeypatch)
+    assert app_module._remove_from_aria2('') is True
+
+
+# --- FR-9 / AC-10 bulk actions -----------------------------------------
+
+class _BulkClient:
+    def __init__(self, *a, **kw):
+        pass
+
+    def pause_all(self):
+        pass
+
+    def unpause_all(self):
+        pass
+
+
+def test_pause_all_skips_empty_gid_rows(app_module, client, monkeypatch):
+    _make_torrent_row(app_module, url=MAGNET, external_id='g1')
+    _make_torrent_row(app_module, url=OTHER, external_id='', status='new')
+    third = MAGNET.replace('0123456789abcdef' * 2, 'c' * 32)
+    _make_torrent_row(
+        app_module, url=third, external_id=None, status='new',
+    )
+    monkeypatch.setattr(app_module.torrent, 'Aria2Client', _BulkClient)
+    client.post('/torrent/pause-all')
+    assert _status(app_module, MAGNET) == 'paused'
+    assert _status(app_module, OTHER) == 'new'
+    assert _status(app_module, third) == 'new'
+
+
+def test_resume_all_includes_empty_gid_paused_rows(
+    app_module, client, monkeypatch,
+):
+    _make_torrent_row(app_module, url=MAGNET, external_id='', status='paused')
+    _make_torrent_row(
+        app_module, url=OTHER, external_id='g', status='failed',
+    )
+    monkeypatch.setattr(app_module.torrent, 'Aria2Client', _BulkClient)
+    client.post('/torrent/resume-all')
+    assert _status(app_module, MAGNET) == 'downloading'
+    assert _status(app_module, OTHER) == 'failed'
+
+
+def test_bulk_actions_leave_http_rows(app_module, client, monkeypatch):
+    _http_row(app_module, status='downloading')
+    monkeypatch.setattr(app_module.torrent, 'Aria2Client', _BulkClient)
+    client.post('/torrent/pause-all')
+    assert _status(app_module, HTTP_URL) == 'downloading'
+    client.post('/torrent/resume-all')
+    assert _status(app_module, HTTP_URL) == 'downloading'
+
+
+def test_bulk_action_aria2_error_leaves_db(app_module, client, monkeypatch):
+    _make_torrent_row(app_module)
+
+    class Bad(_BulkClient):
+        def pause_all(self):
+            raise app_module.torrent.Aria2Error('down')
+
+    monkeypatch.setattr(app_module.torrent, 'Aria2Client', Bad)
+    client.post('/torrent/pause-all')
+    assert _status(app_module) == 'downloading'
+    assert _flashes(client) == ['Nepodařilo se provést akci v aria2.']
+
+
+def test_bulk_action_invalid(app_module):
+    assert app_module._bulk_torrent_action('explode') == (
+        'Neplatná akce.', 'error',
+    )
+
+
+# --- FR-15 / AC-23 validate_url ----------------------------------------
+
+def test_validate_url_rejects_out_of_range_port(app_module):
+    with app_module.app.app_context():
+        assert app_module.validate_url('http://example.com:99999/x') == (
+            'Neplatný link.'
+        )
+
+
+def test_index_post_out_of_range_port_is_not_500(client):
+    resp = client.post('/', data={'link': 'http://example.com:99999/x'})
+    assert resp.status_code == 302
+
+
+def test_validate_url_rejects_bracketed_ipv4(app_module):
+    with app_module.app.app_context():
+        assert app_module.validate_url('http://[1.2.3.4]/x') == (
+            'Neplatný link.'
+        )
+
+
+def test_index_post_bracketed_ipv4_is_not_500(client):
+    resp = client.post('/', data={'link': 'http://[1.2.3.4]/x'})
+    assert resp.status_code == 302
+
+
+def test_index_post_unreachable_url_is_not_500(client, monkeypatch):
+    import requests
+
+    def boom(*a, **kw):
+        raise requests.ConnectionError('unreachable')
+
+    monkeypatch.setattr(requests, 'head', boom)
+    resp = client.post('/', data={'link': 'http://[::1]/x'})
+    assert resp.status_code == 302
+
+
+def test_index_get_webshare_unreachable_is_not_500(client, monkeypatch):
+    import requests
+
+    def boom(*a, **kw):
+        raise requests.ConnectionError('unreachable')
+
+    monkeypatch.setattr(requests, 'post', boom)
+    with client.application.app_context():
+        db = client.application.view_functions['index'].__globals__['get_db']()
+        db.execute("UPDATE settings SET token = 'abc'")
+        db.commit()
+    assert client.get('/').status_code == 200
+
+
+def test_api_post_non_xml_200_is_connection_failed(app_module, monkeypatch):
+    import requests
+
+    class Resp:
+        status_code = 200
+        text = '<html>not closed'
+
+    monkeypatch.setattr(requests, 'post', lambda *a, **kw: Resp())
+    assert app_module.api_post('http://x', {}, {}) == (
+        'Connection failed', '<dummy></dummy>',
+    )
+    assert app_module.check_token('abc') is None
+
+
+def test_validate_url_rejects_bad_ipv4(app_module):
+    with app_module.app.app_context():
+        assert app_module.validate_url('http://300.1.1.1/x') == (
+            'Neplatný link.'
+        )
+
+
+# --- coverage gap tests ------------------------------------------------
+
+def test_validate_url_accepts_valid_ipv4(app_module):
+    with app_module.app.app_context():
+        assert app_module.validate_url('http://10.0.0.1:8080/x') == 'ok'
+
+
+def test_init_db_migrates_pre_torrent_schema(app_module):
+    app_module.DB_PATH.unlink()
+    conn = sqlite3.connect(app_module.DB_PATH)
+    try:
+        conn.execute(
+            'CREATE TABLE links (id INTEGER PRIMARY KEY AUTOINCREMENT, '
+            'url TEXT NOT NULL UNIQUE, status TEXT, pct_downloaded INTEGER)',
+        )
+        conn.execute(
+            'CREATE TABLE settings (id INTEGER PRIMARY KEY CHECK (id = 1), '
+            'token TEXT, auto_download INTEGER, user_name TEXT, '
+            'password_hash TEXT)',
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    app_module.init_db()
+
+    conn = sqlite3.connect(app_module.DB_PATH)
+    try:
+        links = {r[1] for r in conn.execute('PRAGMA table_info(links)')}
+        settings = {
+            r[1] for r in conn.execute('PRAGMA table_info(settings)')
+        }
+    finally:
+        conn.close()
+    assert {
+        'size_bytes', 'speed_bps', 'kind', 'external_id', 'connections',
+        'upload_speed_bps', 'uploaded_bytes',
+    } <= links
+    assert {
+        'dark_mode', 'torrent_enabled', 'torrent_seed_mode',
+        'torrent_seed_value', 'torrent_max_dl_bps', 'torrent_max_ul_bps',
+    } <= settings
+
+
+def test_get_settings_defaults_when_row_missing(app_module):
+    conn = sqlite3.connect(app_module.DB_PATH)
+    try:
+        conn.execute('DELETE FROM settings')
+        conn.commit()
+    finally:
+        conn.close()
+    with app_module.app.app_context():
+        assert app_module.get_settings()['torrent_enabled'] == 0
+
+
+def test_row_to_link_minimal_row(app_module):
+    class Row(dict):
+        pass
+
+    link = app_module._row_to_link(
+        Row(
+            url='https://example.com/a.mp4', status='new', pct_downloaded=0,
+            size_bytes=0, speed_bps=None,
+        ),
+    )
+    assert link.url == 'https://example.com/a.mp4'
+
+
+def test_row_to_link_null_values(app_module):
+    row = {
+        'url': MAGNET, 'status': 'new', 'pct_downloaded': 0,
+        'size_bytes': 0, 'speed_bps': None, 'kind': None,
+        'external_id': None, 'connections': None,
+        'upload_speed_bps': None, 'uploaded_bytes': None,
+    }
+    link = app_module._row_to_link(row)
+    assert link.kind == 'http'
+    assert link.connections == 0
+    assert link.uploaded_bytes == 0
+
+
+def test_magnet_has_valid_btih_variants(app_module):
+    check = app_module._magnet_has_valid_btih
+    assert check('magnet:?dn=x&xt=urn:btih:' + 'a' * 40) is True
+    assert check('magnet:?dn=only') is False
+    assert check('magnet:?xt=urn:sha1:' + 'a' * 40) is False
+    assert check('magnet:?xt=urn:btih:short') is False
+    assert check('xt=urn:btih:' + 'A' * 32) is True
+
+
+def test_add_link_if_new_empty_and_db_error(app_module, monkeypatch):
+    assert app_module.add_link_if_new('  ') == (False, '', None)
+
+    class Bad:
+        def execute(self, *a, **kw):
+            raise sqlite3.Error('locked')
+
+    monkeypatch.setattr(app_module, 'get_db', lambda: Bad())
+    assert app_module.add_link_if_new(MAGNET) == (False, MAGNET, None)
+
+
+def test_index_get_clears_invalid_token(app_module, client, monkeypatch):
+    cleared = []
+    monkeypatch.setattr(app_module, 'check_token', lambda t: False)
+    monkeypatch.setattr(
+        app_module, 'save_token_value', lambda v: cleared.append(v),
+    )
+    assert client.get('/').status_code == 200
+    assert cleared == ['']
+
+
+def test_delete_link_without_url_or_unknown(client):
+    assert client.post('/delete', data={'url': ''}).status_code == 302
+    assert client.post('/delete', data={'url': 'nope'}).status_code == 302
+
+
+def test_delete_staged_torrent_file_survives_os_error(app_module):
+    staged = app_module.TORRENTS_DIR / 'link-7.torrent'
+    staged.mkdir()
+    (staged / 'child').write_bytes(b'x')
+    app_module._delete_staged_torrent_file(7)
+    assert staged.exists()
+
+
+def test_parse_speed_limit_kib(app_module):
+    parse = app_module._parse_speed_limit_kib
+    assert parse('abc') == 0
+    assert parse('-5') == 0
+    assert parse(None) == 0
+    assert parse('2') == 2048
+
+
+def test_torrent_status_files_edge_cases(app_module, monkeypatch):
+    assert app_module._torrent_status_files('') == []
+
+    class Bad:
+        def tell_status(self, gid, keys=None):
+            raise app_module.torrent.Aria2Error('down')
+
+    _use(app_module, monkeypatch, Bad())
+    assert app_module._torrent_status_files('g') == []
+
+
+class _FilesClient:
+    def __init__(self, torrent_mod, files, change_exc=None):
+        self.torrent = torrent_mod
+        self.files = files
+        self.change_exc = change_exc
+        self.changed = []
+
+    def tell_status(self, gid, keys=None):
+        return {'files': self.files}
+
+    def change_option(self, gid, options):
+        if self.change_exc:
+            raise self.torrent.Aria2Error(self.change_exc)
+        self.changed.append(options)
+
+
+def test_select_files_rejects_row_without_gid(app_module, client):
+    _make_torrent_row(app_module, external_id='')
+    client.post('/torrent/select-files', data={'url': MAGNET})
+    assert _flashes(client) == [
+        'Torrent nemá zatím k dispozici seznam souborů.',
+    ]
+
+
+def test_select_files_rejects_when_files_unavailable(
+    app_module, client, monkeypatch,
+):
+    _make_torrent_row(app_module)
+    _use(app_module, monkeypatch, _FilesClient(app_module.torrent, []))
+    client.post('/torrent/select-files', data={'url': MAGNET})
+    assert _flashes(client) == ['Nelze načíst seznam souborů torrentu.']
+
+
+def test_select_files_tolerates_bad_index_and_aria_error(
+    app_module, client, monkeypatch,
+):
+    _make_torrent_row(app_module)
+    stub = _FilesClient(
+        app_module.torrent, [{'index': 'x'}, {'index': '2'}], 'nope',
+    )
+    _use(app_module, monkeypatch, stub)
+    client.post(
+        '/torrent/select-files',
+        data={'url': MAGNET, 'file_index': ['1', '2']},
+    )
+    assert _flashes(client) == ['Nepodařilo se uložit výběr souborů.']
+
+
+def test_index_get_keeps_valid_token(app_module, client, monkeypatch):
+    monkeypatch.setattr(app_module, 'check_token', lambda t: True)
+    assert client.get('/').status_code == 200

@@ -93,7 +93,8 @@ route accordingly.
     `FLASK_SECRET_KEY`.
   - `--save-session` + `--input-file` pointing at the same file →
     torrents survive container restarts (state lives in `/data`, which is
-    already a bind-mount).
+    already a bind-mount). *Dropped later in favour of the app
+    re-enqueueing torrents itself, see §13.*
   - `--seed-time=0` (default) → download-only; user can bump it via a UI
     setting (see §4).
   - `--auto-file-renaming=false` → we want deterministic filenames so the
@@ -563,8 +564,8 @@ Our topology mitigates most of the surface:
   starts downloading attacker-chosen content. Low-medium relevance.
 - **CVE-2026-71832 (BT parser DoS):** a malicious peer sends a crafted
   message → aria2 divides by zero → aria2 crashes. Our entrypoint monitor
-  already restarts crashed processes; `--continue=true` + `--save-session`
-  resume the download. Blast radius: seconds of downtime per torrent.
+  already restarts crashed processes; `--continue=true` and the app's
+  re-enqueue (the session file was dropped, see §13) resume the download. Blast radius: seconds of downtime per torrent.
   No RCE, no data loss, no privilege escalation.
 - **Peer port not exposed by default** in our docker-compose examples →
   inbound BT connections require the user to opt in.
@@ -601,3 +602,29 @@ Proceed with aria2 for v1. The two open CVEs are:
 If that trade-off doesn't sit right, transmission is a drop-in swap at
 the wrapper layer; the rest of the design (settings panel, chip badges,
 `kind`/`external_id` columns, seeding UX) is backend-agnostic.
+
+## 13. Empirical aria2 1.37 behaviour (verified 2026-10-21)
+
+Setup: throwaway container from `spidermila/wsdownloader:0.7.0` (aria2
+1.37.0), a local 2 MiB single-file torrent (256 KiB pieces), a tiny
+Python HTTP tracker on 127.0.0.1 and two aria2 daemons started with the
+entrypoint flags (`--continue=true --auto-file-renaming=false
+--seed-time=0 --bt-save-metadata=false --rpc-save-upload-metadata=false`):
+a seeder and a leecher. Driven over JSON-RPC.
+
+| Case | Observed | Decision |
+|---|---|---|
+| `addTorrent`, payload complete, no `.aria2` file, default options | Immediately `error`, `errorCode 13` ("File ... exists, but a control file(*.aria2) does not exist"). File untouched | Not destructive, but the row would end `failed` |
+| Same + `allow-overwrite=true` | Re-downloads from scratch | Rejected |
+| Same + `check-integrity=true` | `verifiedLength` grows, then `active` + `seeder: 'true'`, then `complete` in about 1.3 s. File untouched | **Pass `check-integrity=true` on every add** |
+| First piece corrupted, no `.aria2`, `check-integrity=true` | Verifies, fetches only the bad piece | Safe for partial payloads |
+| Magnet in a fresh dir | Metadata GID turns `complete` with `followedBy: [<real GID>]`; the real download has `following: <metadata GID>`. The metadata GID stays `complete` until removed | The app follows `followedBy` and swaps the row's GID, then calls `removeDownloadResult` on the metadata GID |
+| Seeding | Real download reports `active` + `seeder: 'true'` while seeding, then `complete` without a `seeder` key when seed-time/ratio is reached | Seeding = `active` + `seeder`; `complete` deletes the row |
+| Magnet re-added, payload complete, no `.aria2` | Same as the torrent case: error 13 without `check-integrity`, verifies and completes with it. The option is inherited by the follow-up download | Same fix |
+| `tellStatus` / `forceRemove` on an unknown GID | Error `{'code': 1, 'message': 'GID <hex> is not found'}` | `torrent.is_gid_not_found` matches this shape |
+| `aria2.saveSession` with magnets | Session holds magnets as magnet URIs (a resolved magnet under its metadata GID); `addTorrent` downloads are absent. After a restart with `--input-file` they are restored, and the app's re-add fails with errorCode 12 ("InfoHash ... is already registered") while the restored copy runs untracked | **Removed `--save-session` and `--input-file`** from `entrypoint.sh`; the app's re-enqueue is the only recovery mechanism |
+
+Known limitations: a row deleted in the few seconds between a magnet's
+metadata completing and the next poll can orphan the follow-up download;
+per-download file selection is lost when a torrent is re-added after an
+aria2 restart.

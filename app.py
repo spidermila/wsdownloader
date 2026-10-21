@@ -360,15 +360,17 @@ def save_credentials(user_name: str, password: str) -> bool:
 def api_post(url: str | bytes, data: dict, headers: dict) -> tuple[str, str]:
     try:
         response = requests.post(url, data=data, headers=headers)
-    except ConnectionError as e:
-        logger.error(
-            'Connection failed strerror=%s, errno=%s, filename=%s',
-            e.strerror, e.errno, e.filename,
-        )
+    except requests.RequestException as e:
+        logger.error('Connection failed: %s', e)
         return ('Connection failed', '<dummy></dummy>')
     rc = response.status_code
     if rc != 200:
         logger.error('Got RC: %d, response.text=%r', rc, response.text)
+        return ('Connection failed', '<dummy></dummy>')
+    try:
+        ET.fromstring(response.text)
+    except ET.ParseError as e:
+        logger.error('Unparseable response: %s', e)
         return ('Connection failed', '<dummy></dummy>')
     return ('OK', response.text)
 
@@ -408,7 +410,7 @@ def login_and_get_token() -> str | None:
     return None
 
 
-def check_token(token: str) -> bool:
+def check_token(token: str) -> bool | None:
     headers = {'Accept': 'text/xml; charset=UTF-8'}
     url = BASE_URL + 'user_data/'
     data = {
@@ -417,7 +419,10 @@ def check_token(token: str) -> bool:
     if len(token) < 1:
         logger.info('No token is set - user is not logged in.')
         return False
-    _, payload = api_post(url, data=data, headers=headers)
+    result, payload = api_post(url, data=data, headers=headers)
+    if result == 'Connection failed':
+        logger.error('check_token() Connection failed')
+        return None
     root = ET.fromstring(payload)
     status = root.find('status')
     if isinstance(status, ET.Element):
@@ -572,7 +577,13 @@ def validate_url(url) -> str:
     if not URL_RE.fullmatch(url):
         return 'Neplatný link.'
 
-    p = urlparse(url)
+    try:
+        p = urlparse(url)
+        p.port
+    except ValueError:
+        logger.error('Invalid URL host or port in: %s', url)
+        return 'Neplatný link.'
+
     allowed_schemes = {'http', 'https'}
     if allowed_schemes is not None and p.scheme.lower() not in allowed_schemes:
         logger.error(
@@ -583,10 +594,6 @@ def validate_url(url) -> str:
     if torrent.classify(url) == torrent.KIND_TORRENT \
             and not _torrents_enabled():
         return 'Torrenty nejsou povoleny. Zapněte je v nastavení.'
-
-    if p.port is not None and not (0 <= p.port <= 65535):
-        logger.error('Invalid URL port: %s', p.port)
-        return 'Neplatný link.'
 
     host = p.hostname or ''
     if (
@@ -607,7 +614,11 @@ def test_url(url: str) -> tuple[bool, int | None]:
     when available, its size in bytes (from the Content-Length header).
     This works for any HTTP(S) link, not just Webshare ones.
     """
-    response = requests.head(url, allow_redirects=True)
+    try:
+        response = requests.head(url, allow_redirects=True)
+    except requests.RequestException as exc:
+        logger.error('URL test failed (%s): %s', url, exc)
+        return (False, None)
     if response.status_code == 200:
         logger.info('URL test succeeded: %s', url)
         content_length = response.headers.get('Content-Length')
@@ -960,7 +971,7 @@ def index():
     total_queue_size = get_total_queue_size()
 
     settings = get_settings()
-    if not check_token(settings['token']):
+    if check_token(settings['token']) is False:
         save_token_value('')
         settings = get_settings()
 
@@ -1054,6 +1065,14 @@ def _remove_from_aria2(external_id: str) -> bool:
         try:
             client.force_remove(external_id)
         except torrent.Aria2Error as exc2:
+            if torrent.is_gid_not_found(exc2):
+                # aria2 no longer knows this GID (session lost on restart);
+                # there is nothing to remove, so let the caller proceed.
+                logger.info(
+                    '_remove_from_aria2() GID %s unknown to aria2; '
+                    'treating as already removed.', external_id,
+                )
+                return True
             logger.warning(
                 '_remove_from_aria2() Force remove of %s failed: %s',
                 external_id, exc2,
@@ -1315,7 +1334,14 @@ def torrent_details():
                 'servers': client.get_servers(db_row['external_id']),
             }
         except torrent.Aria2Error as exc:
-            detail = {'aria2_available': False, 'error': str(exc)}
+            if torrent.is_gid_not_found(exc):
+                detail = {
+                    'aria2_available': False,
+                    'error': 'aria2 tento torrent nezná, '
+                    'bude automaticky znovu přidán',
+                }
+            else:
+                detail = {'aria2_available': False, 'error': str(exc)}
 
     return render_template(
         'torrent_details.html',
@@ -1348,16 +1374,21 @@ def pause_torrent():
 def resume_torrent():
     url = (request.form.get('url') or '').strip()
     row = _torrent_row_by_url(url) if url else None
-    if row is None or row['kind'] == torrent.KIND_HTTP or \
-            not row['external_id']:
+    if row is None or row['kind'] == torrent.KIND_HTTP:
         flash('Není to torrent.', 'error')
+        return redirect(url_for('index'))
+    if not row['external_id']:
+        # GID lost (aria2 restart); torrent_loop re-enqueues downloading rows.
+        _set_row_status(row['id'], 'downloading')
+        flash('Torrent bude znovu přidán do aria2.', 'success')
         return redirect(url_for('index'))
     try:
         torrent.Aria2Client().unpause(row['external_id'])
     except torrent.Aria2Error as exc:
-        logger.warning('resume_torrent() Aria2 error: %s', exc)
-        flash('Nepodařilo se obnovit torrent.', 'error')
-        return redirect(url_for('index'))
+        if not torrent.is_gid_not_found(exc):
+            logger.warning('resume_torrent() Aria2 error: %s', exc)
+            flash('Nepodařilo se obnovit torrent.', 'error')
+            return redirect(url_for('index'))
     _set_row_status(row['id'], 'downloading')
     flash('Torrent obnoven.', 'success')
     return redirect(url_for('index'))
@@ -1377,6 +1408,7 @@ def stop_seeding_torrent():
             'error',
         )
         return redirect(url_for('index'))
+    _delete_staged_torrent_file(row['id'])
     db = get_db()
     db.execute('DELETE FROM links WHERE id = ?', (row['id'],))
     db.commit()
@@ -1461,11 +1493,16 @@ def _bulk_torrent_action(action: str) -> tuple[str, str]:
         return ('Nepodařilo se provést akci v aria2.', 'error')
 
     placeholders = ','.join('?' * len(_BULK_PROTECTED_STATUSES))
+    # Rows without a GID are skipped by torrent_loop while paused, so only
+    # resume (which re-enqueues them) may touch them.
+    gid_filter = (
+        "AND COALESCE(external_id, '') != '' " if action == 'pause' else ''
+    )
     db = get_db()
     db.execute(
         'UPDATE links SET status = ? '
         "WHERE kind IN ('magnet', 'torrent') "
-        'AND external_id IS NOT NULL '
+        f'{gid_filter}'
         f'AND status NOT IN ({placeholders})',
         (new_status, *_BULK_PROTECTED_STATUSES),
     )

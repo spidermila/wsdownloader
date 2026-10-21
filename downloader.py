@@ -910,28 +910,63 @@ def _try_remove_result(client: torrent.Aria2Client, gid: str) -> None:
         pass
 
 
+def _discard_orphan(
+    client: torrent.Aria2Client, gid: str, row_id: int,
+) -> None:
+    """Drop an aria2 download whose row was deleted while it was starting."""
+    try:
+        client.force_remove(gid)
+    except torrent.Aria2Error:
+        pass
+    _try_remove_result(client, gid)
+    _delete_torrent_file(row_id)
+    logger.info(
+        '_discard_orphan() Row %s vanished; removed aria2 GID %s.',
+        row_id, gid,
+    )
+
+
 def _apply_torrent_status(
     row: sqlite3.Row, status: dict, seeding_enabled: bool,
     client: torrent.Aria2Client,
 ) -> None:
     row_id = row['id']
+    gid = row['external_id'] or ''
     aria_status = status.get('status', '')
+    followed = status.get('followedBy') or []
+
+    # Magnet metadata finished: the real download runs under a new GID.
+    if aria_status == 'complete' and followed:
+        if not set_external_id_by_id(row_id, followed[0]):
+            _discard_orphan(client, followed[0], row_id)
+        _try_remove_result(client, gid)
+        return
+
+    # Row about to be deleted — skip progress writes.
+    if aria_status == 'complete':
+        _try_remove_result(client, gid)
+        _delete_torrent_file(row_id)
+        delete_by_id(row_id)
+        return
+
+    if aria_status in ('error', 'removed'):
+        if aria_status == 'error':
+            message = status.get('errorMessage', '') or 'Unknown error'
+            log_download_error(gid, row['url'], 'Torrent error', message)
+        set_status_downloaded_by_id(row_id, 'failed')
+        _try_remove_result(client, gid)
+        _delete_torrent_file(row_id)
+        return
+
     raw_seeder = status.get('seeder')
     if isinstance(raw_seeder, str):
         runtime_seeder = raw_seeder.lower() == 'true'
     else:
         runtime_seeder = bool(raw_seeder)
 
-    # Row about to be deleted — skip progress writes.
-    if aria_status == 'complete' and (
-        not seeding_enabled or not runtime_seeder
-    ):
-        _try_remove_result(client, row['external_id'] or '')
-        _delete_torrent_file(row_id)
-        delete_by_id(row_id)
-        return
-
-    mapped = torrent.map_status(aria_status, seeding_enabled)
+    mapped = torrent.map_status(
+        aria_status, seeding_enabled and runtime_seeder,
+    )
     total = int(status.get('totalLength') or 0)
     completed = int(status.get('completedLength') or 0)
     speed = int(status.get('downloadSpeed') or 0)
@@ -968,13 +1003,6 @@ def _apply_torrent_status(
     if mapped != row['status'] and row['status'] != 'paused':
         set_status_downloaded_by_id(row_id, mapped)
 
-    if aria_status == 'error':
-        gid = row['external_id'] or ''
-        message = status.get('errorMessage', '') or 'Unknown error'
-        log_download_error(gid, row['url'], 'Torrent error', message)
-        _try_remove_result(client, gid)
-        _delete_torrent_file(row_id)
-
 
 def torrent_loop() -> None:
     settings = get_settings()
@@ -986,10 +1014,15 @@ def torrent_loop() -> None:
         return
 
     seeding_enabled = _seeding_enabled(settings)
-    options = torrent.seed_options(
-        settings.get('torrent_seed_mode') or 'off',
-        float(settings.get('torrent_seed_value') or 0),
-    )
+    options = {
+        **torrent.seed_options(
+            settings.get('torrent_seed_mode') or 'off',
+            float(settings.get('torrent_seed_value') or 0),
+        ),
+        # Verify payload already on disk instead of failing (errorCode 13)
+        # when a torrent is re-added after an aria2 restart.
+        'check-integrity': 'true',
+    }
 
     for row in fetch_active_torrents():
         if not row['external_id']:
@@ -1011,12 +1044,24 @@ def torrent_loop() -> None:
                 set_status_downloaded_by_id(row['id'], 'failed')
                 _delete_torrent_file(row['id'])
                 continue
-            set_external_id_by_id(row['id'], gid)
+            if not set_external_id_by_id(row['id'], gid):
+                _discard_orphan(client, gid, row['id'])
+                continue
             set_status_downloaded_by_id(row['id'], 'downloading')
             continue
         try:
             status = client.tell_status(row['external_id'])
         except torrent.Aria2Error as exc:
+            if torrent.is_gid_not_found(exc):
+                # aria2 lost the download (restart wipes the RPC session for
+                # torrents added via addTorrent).  Forget the GID so the next
+                # tick re-enqueues from the staged .torrent / magnet URL.
+                logger.info(
+                    'torrent_loop() GID %s unknown to aria2; re-enqueueing '
+                    'row %s.', row['external_id'], row['id'],
+                )
+                set_external_id_by_id(row['id'], '')
+                continue
             logger.warning(
                 'torrent_loop() tellStatus failed for GID %s: %s',
                 row['external_id'], exc,

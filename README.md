@@ -140,6 +140,14 @@ content: >
 title: Files waiting for download
 ```
 
+## Development
+
+Tests: `pytest`. Every torrent-related function must stay fully covered
+(lines and branches) and every changed line must be covered. After `pytest`
+run `python check_coverage.py [BASE_REF]` (default `origin/main`) to check
+both. Enable it as a pre-push hook once with
+`pre-commit install --hook-type pre-push`; CI runs it too.
+
 ## Third-party licenses
 
 This project is released under the [MIT License](LICENSE). Its Python
