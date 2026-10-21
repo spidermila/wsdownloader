@@ -25,6 +25,7 @@ def temp_env(tmp_path, monkeypatch):
     monkeypatch.setenv('DB_PATH', str(db_path))
     monkeypatch.setenv('FLASK_SECRET_KEY', 'test-secret-key')
     monkeypatch.delenv('ARIA2_RPC_SECRET', raising=False)
+    monkeypatch.delenv('APP_VERSION', raising=False)
 
     import torrent
     importlib.reload(torrent)

@@ -31,6 +31,7 @@ RUN pip install --no-cache-dir --require-hashes -r /app/requirements.txt
 
 COPY app.py downloader.py torrent.py /app/
 COPY templates/ /app/templates/
+ENV APP_VERSION=$VERSION
 
 # Create download path and data path
 RUN mkdir -p /downloads /data \

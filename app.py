@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
 from threading import Thread
@@ -75,6 +76,7 @@ app.secret_key = os.getenv('FLASK_SECRET_KEY') or secrets.token_hex(32)
 # In dev, default to project-local ./data and ./downloads
 # In Docker, we set env vars to keep using /data and /downloads
 APP_ROOT = Path(__file__).resolve().parent
+APP_VERSION: str = os.getenv('APP_VERSION') or 'dev'
 DATA_DIR = Path(os.getenv('DATA_DIR') or (APP_ROOT / 'data'))
 DOWNLOADS_PATH = Path(os.getenv('DOWNLOADS_DIR') or (APP_ROOT / 'downloads'))
 DB_PATH = Path(os.getenv('DB_PATH') or (DATA_DIR / 'downloader.db'))
@@ -985,6 +987,7 @@ def index():
 
     return render_template(
         'index.html',
+        app_version=APP_VERSION,
         links=links,
         files=files,
         fs=fs,
@@ -1121,93 +1124,179 @@ def _set_row_status(row_id: int, status: str) -> None:
     db.commit()
 
 
-@app.route('/delete', methods=['POST'])
-def delete_link():
-    url_to_delete = (request.form.get('url') or '').strip()
-    if not url_to_delete:
-        logger.error('delete_link() No URL provided')
-        flash('Žádná URL poskytnuta.', 'error')
-        return redirect(url_for('index'))
+FLASH_NAMES_MAX = 5
+FLASH_NAME_LEN = 60
 
-    db = get_db()
-    row = db.execute(
-        'SELECT id, kind, external_id FROM links WHERE url = ?',
-        (url_to_delete,),
-    ).fetchone()
-    if row is None:
-        logger.warning('delete_link() Link not found: %s', url_to_delete)
-        flash(f"Nenalezeno: {url_to_delete}", 'error')
-        return redirect(url_for('index'))
+_FILE_MESSAGES: dict[str, tuple[str, str]] = {
+    'file': ('Odstraněn soubor: {}', 'success'),
+    'dir': ('Odstraněna složka: {}', 'success'),
+    'invalid': ('Neplatná cesta k souboru.', 'error'),
+    'missing': ('Soubor nenalezen: {}', 'error'),
+    'error': ('Chyba při odstraňování souboru: {}', 'error'),
+}
+_LINK_MESSAGES: dict[str, tuple[str, str]] = {
+    'ok': ('Odstraněno: {}', 'success'),
+    'missing': ('Nenalezeno: {}', 'error'),
+    'aria2': (
+        'Nepodařilo se odebrat torrent z aria2. Zkuste to znovu.', 'error',
+    ),
+    'error': ('Chyba při odstraňování: {}', 'error'),
+}
 
-    if row['kind'] != torrent.KIND_HTTP:
-        if not _remove_from_aria2(row['external_id']):
-            flash(
-                'Nepodařilo se odebrat torrent z aria2. '
-                'Zkuste to znovu.',
-                'error',
+
+def _delete_link_by_url(url_to_delete: str) -> str:
+    try:
+        db = get_db()
+        row = db.execute(
+            'SELECT id, kind, external_id FROM links WHERE url = ?',
+            (url_to_delete,),
+        ).fetchone()
+        if row is None:
+            logger.warning(
+                '_delete_link_by_url() Link not found: %s', url_to_delete,
             )
-            return redirect(url_for('index'))
-        _delete_staged_torrent_file(row['id'])
+            return 'missing'
 
-    db.execute('DELETE FROM links WHERE url = ?', (url_to_delete,))
-    db.commit()
-    logger.info('delete_link() Link deleted: %s', url_to_delete)
-    flash(f"Odstraněno: {url_to_delete}", 'success')
-    socketio.emit('link_deleted', {'url': url_to_delete})
-    return redirect(url_for('index'))
+        if row['kind'] != torrent.KIND_HTTP:
+            if not _remove_from_aria2(row['external_id']):
+                return 'aria2'
+            _delete_staged_torrent_file(row['id'])
+
+        db.execute('DELETE FROM links WHERE url = ?', (url_to_delete,))
+        db.commit()
+        logger.info('_delete_link_by_url() Link deleted: %s', url_to_delete)
+        socketio.emit('link_deleted', {'url': url_to_delete})
+        return 'ok'
+    except Exception as e:
+        logger.error(
+            '_delete_link_by_url() Error deleting %s: %s', url_to_delete, e,
+        )
+        return 'error'
 
 
-@app.route('/delete-file', methods=['POST'])
-def delete_file():
-    filename = (request.form.get('filename') or '').strip()
-    if not filename:
-        logger.error('delete_file() No filename provided')
-        flash('Zadán název souboru.', 'error')
-        return redirect(url_for('index'))
-
+def _delete_download(filename: str) -> str:
     try:
         root = DOWNLOADS_PATH.resolve()
         candidate = (root / filename).resolve()
 
         if not str(candidate).startswith(str(root) + os.sep):
             logger.error(
-                'delete_file() Invalid file path: %s is outside of %s',
+                '_delete_download() Invalid file path: %s is outside of %s',
                 candidate, root,
             )
-            flash('Neplatná cesta k souboru.', 'error')
-            return redirect(url_for('index'))
+            return 'invalid'
 
         if candidate.exists() and candidate.is_file():
             candidate.unlink()
             _clear_file_caches(candidate)
-            logger.info('delete_file() File deleted: %s', candidate)
-            flash(f"Odstraněn soubor: {filename}", 'success')
+            logger.info('_delete_download() File deleted: %s', candidate)
             socketio.emit('file_deleted', {'filename': filename})
-        elif candidate.exists() and candidate.is_dir():
+            return 'file'
+        if candidate.exists() and candidate.is_dir():
             for child in candidate.rglob('*'):
                 if child.is_file():
                     _clear_file_caches(child)
             shutil.rmtree(candidate)
-            logger.info('delete_file() Directory deleted: %s', candidate)
-            flash(f"Odstraněna složka: {filename}", 'success')
+            logger.info('_delete_download() Directory deleted: %s', candidate)
             socketio.emit('file_deleted', {'filename': filename})
-        else:
-            logger.warning('delete_file() File not found: %s', candidate)
-            flash(f"Soubor nenalezen: {filename}", 'error')
+            return 'dir'
+        logger.warning('_delete_download() File not found: %s', candidate)
+        return 'missing'
     except Exception as e:
-        logger.error('delete_file() Error deleting file %s: %s', filename, e)
-        flash(f"Chyba při odstraňování souboru: {filename}", 'error')
+        logger.error(
+            '_delete_download() Error deleting file %s: %s', filename, e,
+        )
+        return 'error'
 
+
+def _flash_bulk_result(deleted: int, failed: list[str]) -> None:
+    if not failed:
+        flash(f'Odstraněno: {deleted}', 'success')
+        return
+    names = ', '.join(
+        n if len(n) <= FLASH_NAME_LEN else n[:FLASH_NAME_LEN - 3] + '…'
+        for n in failed[:FLASH_NAMES_MAX]
+    )
+    more = len(failed) - FLASH_NAMES_MAX
+    if more > 0:
+        names += f' a další {more}'
+    flash(
+        f'Odstraněno: {deleted}. '
+        f'Nepodařilo se odstranit ({len(failed)}): {names}',
+        'warning' if deleted else 'error',
+    )
+
+
+def _form_items(field: str) -> list[str]:
+    return list(
+        dict.fromkeys(
+            v for v in request.form.getlist(field) if v.strip()
+        ),
+    )
+
+
+def _link_label(url: str) -> str:
+    link = Link(url)
+    if url.startswith('magnet:'):
+        link.kind = torrent.KIND_MAGNET
+    try:
+        return link.get_file_name() or url
+    except ValueError:
+        return url
+
+
+def _delete_many(
+    items: list[str],
+    helper: Callable[[str], str],
+    ok_outcomes: tuple[str, ...],
+    messages: dict[str, tuple[str, str]],
+    label: Callable[[str], str] = str,
+) -> None:
+    if len(items) == 1:
+        template, category = messages[helper(items[0])]
+        flash(template.format(items[0]), category)
+        return
+    failed = [i for i in items if helper(i) not in ok_outcomes]
+    deleted = len(items) - len(failed)
+    logger.info(
+        '_delete_many() Bulk delete: %d ok, %d failed', deleted, len(failed),
+    )
+    _flash_bulk_result(deleted, [label(i) for i in failed])
+
+
+@app.route('/delete', methods=['POST'])
+def delete_link():
+    items = _form_items('url')
+    if not items:
+        logger.error('delete_link() No URL provided')
+        flash('Žádná URL poskytnuta.', 'error')
+        return redirect(url_for('index'))
+    _delete_many(
+        items, _delete_link_by_url, ('ok',), _LINK_MESSAGES, _link_label,
+    )
+    return redirect(url_for('index'))
+
+
+@app.route('/delete-file', methods=['POST'])
+def delete_file():
+    items = _form_items('filename')
+    if not items:
+        logger.error('delete_file() No filename provided')
+        flash('Zadán název souboru.', 'error')
+        return redirect(url_for('index'))
+    _delete_many(
+        items, _delete_download, ('file', 'dir'), _FILE_MESSAGES,
+    )
     return redirect(url_for('index'))
 
 
 @app.route('/rename-file', methods=['POST'])
 def rename_file():
     """Rename a file in the downloads directory."""
-    old_name = (request.form.get('old_name') or '').strip()
+    old_name = request.form.get('old_name') or ''
     new_name = (request.form.get('new_name') or '').strip()
 
-    if not old_name or not new_name:
+    if not old_name.strip() or not new_name:
         logger.error('rename_file() Missing old_name or new_name')
         return jsonify({
             'success': False,

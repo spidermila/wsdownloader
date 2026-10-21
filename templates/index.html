@@ -25,11 +25,22 @@
     }
     h1 { font-size: 1.6rem; }
     .col-filename { font-size: 1rem; }
+    .col-select { width: 2.75rem; }
+    .select-hit { display: inline-flex; padding: .4rem; margin: -.4rem; cursor: pointer; }
+    .col-select .form-check-input { width: 1.4rem; height: 1.4rem; }
+    .bulk-bar[hidden] { display: none !important; }
+    .bulk-bar .btn { min-height: 2.25rem; }
 
-    @media (max-width: 575.98px) {
+    @media (max-width: 767.98px) {
+      #links-container .col-filename { min-width: 3rem; }
       .table.table-striped > :not(caption) > * > * {
         padding: 0.5rem 0.5rem;
       }
+      #links-container .table > :not(caption) > * > * {
+        padding-left: 0.3rem;
+        padding-right: 0.3rem;
+      }
+      #links-container .col-select { width: 2.2rem; padding-right: 0; }
     }
   </style>
 </head>
@@ -304,22 +315,58 @@
     {% endwith %}
     <div id="flash-container"></div>
 
+    <div class="bulk-bar d-flex flex-wrap align-items-center gap-2 my-2" data-bulk="links" hidden>
+      <button type="button" class="btn btn-sm btn-danger bulk-delete" disabled onclick="bulkDelete('links')">Smazat vybrané</button>
+      <span class="small text-body-secondary">Vybráno: <span class="bulk-count">0</span></span>
+    </div>
     <div id="links-container">
       {% if links and links|length > 0 %}
         <div class="table-responsive">
           <table class="table table-striped align-middle">
             <thead>
               <tr>
+                <th scope="col" class="col-select"><label class="select-hit"><input type="checkbox" class="form-check-input select-all m-0" aria-label="Vybrat vše"></label></th>
                 <th scope="col" class="text-break col-filename">Soubor</th>
                 <th scope="col" class="d-sm-table-cell">Status</th>
-                <th scope="col" class="d-sm-table-cell">Velikost</th>
-                <th scope="col" class="d-sm-table-cell">Progres</th>
+                <th scope="col" class="d-none d-md-table-cell">Velikost</th>
+                <th scope="col" class="d-none d-md-table-cell">Progres</th>
                 <th scope="col">Akce</th>
               </tr>
             </thead>
             <tbody id="links-tbody">
               {% for l in links %}
                 <tr>
+                  {%- macro fmt_speed(bps) -%}
+                    {%- if bps and bps > 0 -%}
+                      {%- if (bps / 1024) < 1024 -%}
+                        {{ '%.1f'|format(bps / 1024) }} KB/s
+                      {%- else -%}
+                        {{ '%.1f'|format(bps / 1048576) }} MB/s
+                      {%- endif -%}
+                    {%- else -%}0 KB/s{%- endif -%}
+                  {%- endmacro -%}
+                  {%- set progress_text -%}
+                    {% if l.status == "downloading" %}
+                      {{ l.pct_downloaded }}% ↓ {{ fmt_speed(l.speed_bps) }}
+                      {% if l.kind != 'http' %}
+                        &middot; ↑ {{ fmt_speed(l.upload_speed_bps) }}
+                        &middot; ({{ l.connections }} spojení)
+                      {% endif %}
+                    {% elif l.status == "seeding" %}
+                      ↑ {{ fmt_speed(l.upload_speed_bps) }}
+                      &middot; poměr {{ '%.2f'|format(l.ratio if l.ratio is defined else 0) }}
+                      &middot; ({{ l.connections }} spojení)
+                    {% elif l.status == "paused" %}
+                      Pozastaveno
+                    {% else %}
+                      &mdash;
+                    {% endif %}
+                  {%- endset -%}
+                  <td class="col-select">
+                    {%- if not (l.status == 'seeding' or (l.status == 'downloading' and l.kind == 'http')) -%}
+                      <label class="select-hit"><input type="checkbox" class="form-check-input row-select m-0" value="{{ l.url }}" aria-label="Vybrat {{ l.get_file_name() }}"></label>
+                    {%- endif -%}
+                  </td>
                   <td class="fw-semibold text-break col-filename">
                     {% if l.kind == 'magnet' %}<span class="badge bg-secondary me-1" title="magnet">🧲</span>{% elif l.kind == 'torrent' %}<span class="badge bg-secondary me-1" title="torrent">📦</span>{% endif %}
                     {{ l.get_file_name() }}
@@ -336,35 +383,11 @@
                     {% else %}
                       &mdash;
                     {% endif %}
+                    <div class="d-md-none small text-muted progress-mobile">{{ progress_text }}</div>
                   </td>
-                  <td class="d-sm-table-cell">{{ l.get_human_size() }}</td>
-                  {%- macro fmt_speed(bps) -%}
-                    {%- if bps and bps > 0 -%}
-                      {%- if (bps / 1024) < 1024 -%}
-                        {{ '%.1f'|format(bps / 1024) }} KB/s
-                      {%- else -%}
-                        {{ '%.1f'|format(bps / 1048576) }} MB/s
-                      {%- endif -%}
-                    {%- else -%}0 KB/s{%- endif -%}
-                  {%- endmacro -%}
-                  <td class="d-sm-table-cell">
-                    {% if l.status == "downloading" %}
-                      {{ l.pct_downloaded }}% ↓ {{ fmt_speed(l.speed_bps) }}
-                      {% if l.kind != 'http' %}
-                        &middot; ↑ {{ fmt_speed(l.upload_speed_bps) }}
-                        &middot; ({{ l.connections }} spojení)
-                      {% endif %}
-                    {% elif l.status == "seeding" %}
-                      ↑ {{ fmt_speed(l.upload_speed_bps) }}
-                      &middot; poměr {{ '%.2f'|format(l.ratio if l.ratio is defined else 0) }}
-                      &middot; ({{ l.connections }} spojení)
-                    {% elif l.status == "paused" %}
-                      Pozastaveno
-                    {% else %}
-                      &mdash;
-                    {% endif %}
-                  </td>
-                  <td class="text-nowrap">
+                  <td class="d-none d-md-table-cell">{{ l.get_human_size() }}</td>
+                  <td class="d-none d-md-table-cell">{{ progress_text }}</td>
+                  <td class="actions-cell">
                     {% if l.kind != 'http' %}
                       <a href="{{ url_for('torrent_details', url=l.url) }}" class="btn btn-sm btn-outline-info" title="Detail">ℹ</a>
                     {% endif %}
@@ -407,9 +430,9 @@
             </tbody>
             <tfoot>
               <tr id="links-total-row">
-                <td class="fw-semibold text-end" colspan="2">Celkem:</td>
-                <td class="d-sm-table-cell fw-semibold" id="links-total-size">{{ total_queue_size_human }}</td>
-                <td class="d-sm-table-cell"></td>
+                <td class="fw-semibold text-end" colspan="3">Celkem:</td>
+                <td class="d-none d-md-table-cell fw-semibold" id="links-total-size">{{ total_queue_size_human }}</td>
+                <td class="d-none d-md-table-cell"></td>
                 <td></td>
               </tr>
             </tfoot>
@@ -444,12 +467,17 @@
       </div>
     </div>
 
+    <div class="bulk-bar d-flex flex-wrap align-items-center gap-2 my-2" data-bulk="files" hidden>
+      <button type="button" class="btn btn-sm btn-danger bulk-delete" disabled onclick="bulkDelete('files')">Smazat vybrané</button>
+      <span class="small text-body-secondary">Vybráno: <span class="bulk-count">0</span></span>
+    </div>
     <div id="files-container">
       {% if files and files|length > 0 %}
         <div class="table-responsive">
           <table class="table table-striped align-middle">
             <thead>
               <tr>
+                <th scope="col" class="col-select"><label class="select-hit"><input type="checkbox" class="form-check-input select-all m-0" aria-label="Vybrat vše"></label></th>
                 <th scope="col" class="text-break col-filename">Soubor</th>
                 <th scope="col" class="d-none d-sm-table-cell">Velikost</th>
                 <th scope="col">Akce</th>
@@ -458,6 +486,7 @@
             <tbody id="files-tbody">
               {% for f in files %}
                 <tr data-filename="{{ f.name }}">
+                  <td class="col-select"><label class="select-hit"><input type="checkbox" class="form-check-input row-select m-0" value="{{ f.name }}" aria-label="Vybrat {{ f.name }}"></label></td>
                   <td class="fw-semibold text-break col-filename">
                     <span class="filename-display">{{ f.name }}</span>
                   </td>
@@ -492,6 +521,10 @@
     </div>
 
   </div>
+  <footer class="container py-3 mt-4 border-top small text-body-secondary text-center">
+    wsdownloader
+    <a href="https://github.com/spidermila/wsdownloader" target="_blank" rel="noopener noreferrer">{{ 'v' if app_version[:1].isdigit() }}{{ app_version }}</a>
+  </footer>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
   <script>
@@ -563,6 +596,7 @@
             <a href="{{ url_for('help_page') }}">Jak přidat link?</a>
           </p>
         `;
+        syncSelection('links');
         return;
       }
 
@@ -572,19 +606,20 @@
           <table class="table table-striped align-middle">
             <thead>
               <tr>
+                <th scope="col" class="col-select"><label class="select-hit"><input type="checkbox" class="form-check-input select-all m-0" aria-label="Vybrat vše"></label></th>
                 <th scope="col" class="text-break col-filename">Soubor</th>
                 <th scope="col" class="d-sm-table-cell">Status</th>
-                <th scope="col" class="d-sm-table-cell">Velikost</th>
-                <th scope="col" class="d-sm-table-cell">Progres</th>
+                <th scope="col" class="d-none d-md-table-cell">Velikost</th>
+                <th scope="col" class="d-none d-md-table-cell">Progres</th>
                 <th scope="col">Akce</th>
               </tr>
             </thead>
             <tbody id="links-tbody"></tbody>
             <tfoot>
               <tr id="links-total-row">
-                <td class="fw-semibold text-end" colspan="2">Celkem:</td>
-                <td class="d-sm-table-cell fw-semibold" id="links-total-size"></td>
-                <td class="d-sm-table-cell"></td>
+                <td class="fw-semibold text-end" colspan="3">Celkem:</td>
+                <td class="d-none d-md-table-cell fw-semibold" id="links-total-size"></td>
+                <td class="d-none d-md-table-cell"></td>
                 <td></td>
               </tr>
             </tfoot>
@@ -596,11 +631,15 @@
       links.forEach(l => {
         const tr = document.createElement('tr');
         tr.dataset.url = l.url;
+        const rowBox = canDelete(l)
+          ? `<label class="select-hit"><input type="checkbox" class="form-check-input row-select m-0" value="${escapeHtml(l.url)}" aria-label="Vybrat ${escapeHtml(l.file_name)}"></label>`
+          : '';
         tr.innerHTML = `
+          <td class="col-select">${rowBox}</td>
           <td class="fw-semibold text-break col-filename">${renderKindBadge(l.kind)}${escapeHtml(l.file_name)}</td>
-          <td class="d-sm-table-cell status-cell">${renderStatus(l.status)}</td>
-          <td class="d-sm-table-cell size-cell">${escapeHtml(l.human_size)}</td>
-          <td class="d-sm-table-cell progress-cell">${renderProgress(l)}</td>
+          <td class="d-sm-table-cell status-cell">${renderStatus(l.status)}<div class="d-md-none small text-muted progress-mobile">${renderProgress(l)}</div></td>
+          <td class="d-none d-md-table-cell size-cell">${escapeHtml(l.human_size)}</td>
+          <td class="d-none d-md-table-cell progress-cell">${renderProgress(l)}</td>
           <td class="actions-cell">${renderActions(l)}</td>
         `;
         tbody.appendChild(tr);
@@ -608,6 +647,7 @@
 
       const totalSizeCell = document.getElementById('links-total-size');
       if (totalSizeCell) totalSizeCell.textContent = totalQueueSizeHuman || '0 B';
+      syncSelection('links');
     }
 
     function renderFiles(files) {
@@ -619,6 +659,7 @@
 
       if (!files || files.length === 0) {
         container.innerHTML = '<p class="empty">Žádné stažené soubory.</p>';
+        syncSelection('files');
         return;
       }
 
@@ -627,6 +668,7 @@
           <table class="table table-striped align-middle">
             <thead>
               <tr>
+                <th scope="col" class="col-select"><label class="select-hit"><input type="checkbox" class="form-check-input select-all m-0" aria-label="Vybrat vše"></label></th>
                 <th scope="col" class="text-break col-filename">Soubor</th>
                 <th scope="col" class="d-none d-sm-table-cell">Velikost</th>
                 <th scope="col">Akce</th>
@@ -650,6 +692,7 @@
              </a>`
           : '';
         tr.innerHTML = `
+          <td class="col-select"><label class="select-hit"><input type="checkbox" class="form-check-input row-select m-0" value="${safeName}" aria-label="Vybrat ${safeName}"></label></td>
           <td class="fw-semibold text-break col-filename">
             <span class="filename-display">${safeName}</span>
           </td>
@@ -673,6 +716,71 @@
         `;
         tbody.appendChild(tr);
       });
+      syncSelection('files');
+    }
+
+    // ── Bulk selection ────────────────────────────────────────────────────────
+    const selected = { files: new Set(), links: new Set() };
+    const CONTAINER = { files: 'files-container', links: 'links-container' };
+    const FIELD = { files: 'filename', links: 'url' };
+    const ACTION = { files: "{{ url_for('delete_file') }}", links: "{{ url_for('delete_link') }}" };
+
+    function canDelete(l) {
+      return !(l.status === 'seeding' || (l.status === 'downloading' && l.kind === 'http'));
+    }
+
+    function syncSelection(kind) {
+      const container = document.getElementById(CONTAINER[kind]);
+      const bar = document.querySelector(`.bulk-bar[data-bulk="${kind}"]`);
+      const boxes = [...container.querySelectorAll('input.row-select:not(:disabled)')];
+      const present = new Set(boxes.map(b => b.value));
+      selected[kind].forEach(v => { if (!present.has(v)) selected[kind].delete(v); });
+      boxes.forEach(b => { b.checked = selected[kind].has(b.value); });
+      const n = boxes.length;
+      const sel = selected[kind].size;
+      const all = container.querySelector('input.select-all');
+      if (all) {
+        all.checked = n > 0 && sel === n;
+        all.indeterminate = sel > 0 && sel < n;
+        all.disabled = n === 0;
+      }
+      bar.hidden = n === 0;
+      bar.querySelector('.bulk-count').textContent = sel;
+      bar.querySelector('.bulk-delete').disabled = sel === 0;
+    }
+
+    Object.keys(CONTAINER).forEach(kind => {
+      document.getElementById(CONTAINER[kind]).addEventListener('change', e => {
+        const t = e.target;
+        if (t.classList.contains('row-select')) {
+          if (t.checked) selected[kind].add(t.value); else selected[kind].delete(t.value);
+        } else if (t.classList.contains('select-all')) {
+          e.currentTarget.querySelectorAll('input.row-select:not(:disabled)').forEach(b => {
+            if (t.checked) selected[kind].add(b.value); else selected[kind].delete(b.value);
+          });
+        } else {
+          return;
+        }
+        syncSelection(kind);
+      });
+    });
+
+    function bulkDelete(kind) {
+      const items = [...selected[kind]];
+      if (items.length === 0) return;
+      if (!confirm(`Opravdu smazat vybrané položky? Počet: ${items.length}`)) return;
+      const form = document.createElement('form');
+      form.method = 'post';
+      form.action = ACTION[kind];
+      items.forEach(item => {
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = FIELD[kind];
+        input.value = item;
+        form.appendChild(input);
+      });
+      document.body.appendChild(form);
+      form.submit();
     }
 
     function renderStatus(status) {
@@ -701,16 +809,16 @@
       if (l.status === 'seeding') {
         const up = formatSpeed(l.upload_speed_bps) || '0 KB/s';
         const ratio = (l.ratio != null ? l.ratio : 0).toFixed(2);
-        return `↑ ${up} · poměr ${ratio} · (${l.connections || 0} spojení)`;
+        return `↑ ${up} · poměr ${ratio} · (${escapeHtml(l.connections || 0)} spojení)`;
       }
       if (l.status === 'paused') return 'Pozastaveno';
       if (l.status !== 'downloading') return '&mdash;';
       const down = formatSpeed(l.speed_bps) || '0 KB/s';
       if (l.kind && l.kind !== 'http') {
         const up = formatSpeed(l.upload_speed_bps) || '0 KB/s';
-        return `${l.pct_downloaded}% ↓ ${down} · ↑ ${up} · (${l.connections || 0} spojení)`;
+        return `${escapeHtml(l.pct_downloaded)}% ↓ ${down} · ↑ ${up} · (${escapeHtml(l.connections || 0)} spojení)`;
       }
-      return `${l.pct_downloaded}% ↓ ${down}`;
+      return `${escapeHtml(l.pct_downloaded)}% ↓ ${down}`;
     }
 
     function renderActions(l) {
@@ -777,12 +885,12 @@
         }
 
         rows += `
-          <tr data-file-id="${err.file_id}">
-            <td class="text-break" style="max-width: 300px;">${err.file_name}</td>
-            <td>${errorText}</td>
+          <tr data-file-id="${escapeHtml(err.file_id)}">
+            <td class="text-break" style="max-width: 300px;">${escapeHtml(err.file_name)}</td>
+            <td>${escapeHtml(errorText)}</td>
             <td class="text-nowrap">
               <form method="post" action="/error/dismiss" class="d-inline">
-                <input type="hidden" name="file_id" value="${err.file_id}">
+                <input type="hidden" name="file_id" value="${escapeHtml(err.file_id)}">
                 <button type="submit" class="btn btn-sm btn-outline-danger">Zrušit</button>
               </form>
             </td>
@@ -875,11 +983,16 @@
       // Mark this row as being edited
       tr.dataset.editing = 'true';
       updateRenamingState();
+      const rowBox = tr.querySelector('.row-select');
+      if (rowBox) {
+        selected.files.delete(rowBox.value);
+        rowBox.checked = false;
+        rowBox.disabled = true;
+        syncSelection('files');
+      }
 
       // Replace filename display with input
-      const escapedName = originalName
-        .replace(/&/g, '&amp;')
-        .replace(/"/g, '&quot;');
+      const escapedName = escapeHtml(originalName);
       filenameCell.innerHTML = `
         <input type="text"
                class="form-control form-control-sm rename-input"
@@ -983,13 +1096,17 @@
     function restoreRow(tr, filename) {
       delete tr.dataset.editing;
       updateRenamingState();
+      const rowBox = tr.querySelector('.row-select');
+      if (rowBox) {
+        rowBox.disabled = false;
+        rowBox.value = filename;
+        syncSelection('files');
+      }
 
       const filenameCell = tr.querySelector('.col-filename');
       const actionsCell = tr.querySelector('.actions-cell');
 
-      const escapedName = filename
-        .replace(/&/g, '&amp;')
-        .replace(/"/g, '&quot;');
+      const escapedName = escapeHtml(filename);
 
       filenameCell.innerHTML =
         `<span class="filename-display">${escapedName}</span>`;
@@ -1033,6 +1150,9 @@
       if (dot < 0) return false;
       return VIDEO_EXTENSIONS.has(filename.slice(dot + 1).toLowerCase());
     }
+
+    syncSelection('files');
+    syncSelection('links');
   </script>
 </body>
 </html>
