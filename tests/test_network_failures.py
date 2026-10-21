@@ -22,6 +22,9 @@ FAILURES = {
     'connection-error': _raiser(requests.ConnectionError('down')),
     'timeout': _raiser(requests.Timeout('slow')),
     'html-200': lambda *a, **kw: FakeResponse(200, '<html><body>x</body>'),
+    'wellformed-html-200': lambda *a, **kw: FakeResponse(
+        200, '<html><body>x</body></html>',
+    ),
     'empty-200': lambda *a, **kw: FakeResponse(200, ''),
     'http-503': lambda *a, **kw: FakeResponse(503, 'unavailable'),
 }
@@ -75,3 +78,30 @@ def test_rejected_token_is_cleared(app_module, client, monkeypatch):
     )
     assert client.get('/').status_code == 200
     assert _get_token(app_module) == ''
+
+
+def test_valid_token_is_kept(app_module, client, monkeypatch):
+    _set_token(app_module, TOKEN)
+    monkeypatch.setattr(
+        requests, 'post',
+        lambda *a, **kw: FakeResponse(
+            200, '<response><status>OK</status></response>',
+        ),
+    )
+    assert app_module.check_token(TOKEN) is True
+    assert client.get('/').status_code == 200
+    assert _get_token(app_module) == TOKEN
+
+
+@pytest.mark.parametrize('module', ['app_module', 'downloader_module'])
+def test_api_post_sets_timeout(request, monkeypatch, module):
+    mod = request.getfixturevalue(module)
+    seen = {}
+
+    def fake_post(*a, **kw):
+        seen.update(kw)
+        return FakeResponse(200, '<response><status>OK</status></response>')
+    monkeypatch.setattr(requests, 'post', fake_post)
+    result, _ = mod.api_post('http://x/', data={}, headers={})
+    assert result == 'OK'
+    assert seen['timeout'] == 30

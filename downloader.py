@@ -338,7 +338,9 @@ def get_fs_usage(base_path: Path | None = None) -> dict:
 
 def api_post(url: str | bytes, data: dict, headers: dict) -> tuple[str, str]:
     try:
-        response = requests.post(url, data=data, headers=headers)
+        response = requests.post(
+            url, data=data, headers=headers, timeout=30,
+        )
     except RequestException as e:
         logger.error('api_post() Connection failed: %s', e)
         return ('Connection failed', '<dummy></dummy>')

@@ -1,5 +1,6 @@
 """Tests for the coverage gate script (check_coverage.py)."""
 import json
+import os
 import shutil
 import subprocess
 
@@ -185,7 +186,7 @@ def _git(cwd, *args):
     subprocess.run(
         ['git', *args], cwd=cwd, check=True, capture_output=True,
         env={
-            'GIT_CONFIG_GLOBAL': '/dev/null', 'PATH': '/usr/bin:/bin',
+            'GIT_CONFIG_GLOBAL': '/dev/null', 'PATH': os.environ['PATH'],
             'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t',
             'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@t',
         },
