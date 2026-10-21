@@ -318,7 +318,9 @@ def get_salt(user_name: str) -> str | None:
     url = BASE_URL + 'salt/'
     data = {'username_or_email': user_name}
     try:
-        response = requests.post(url, data=data, headers=headers)
+        response = requests.post(
+            url, data=data, headers=headers, timeout=30,
+        )
         xml = ET.fromstring(response.content)
         status_elem = xml.find('status')
         salt_elem = xml.find('salt')
@@ -359,7 +361,9 @@ def save_credentials(user_name: str, password: str) -> bool:
 
 def api_post(url: str | bytes, data: dict, headers: dict) -> tuple[str, str]:
     try:
-        response = requests.post(url, data=data, headers=headers)
+        response = requests.post(
+            url, data=data, headers=headers, timeout=30,
+        )
     except requests.RequestException as e:
         logger.error('Connection failed: %s', e)
         return ('Connection failed', '<dummy></dummy>')
@@ -425,10 +429,14 @@ def check_token(token: str) -> bool | None:
         return None
     root = ET.fromstring(payload)
     status = root.find('status')
-    if isinstance(status, ET.Element):
-        if status.text == 'OK':
-            logger.info('check_token() OK')
-            return True
+    if root.tag != 'response' or not isinstance(status, ET.Element):
+        # Not a Webshare API answer (e.g. a proxy or maintenance page):
+        # treat like an outage so the stored token survives.
+        logger.error('check_token() Unexpected response: %r', payload[:200])
+        return None
+    if status.text == 'OK':
+        logger.info('check_token() OK')
+        return True
     logger.error('check_token() failed')
     return False
 
@@ -615,7 +623,7 @@ def test_url(url: str) -> tuple[bool, int | None]:
     This works for any HTTP(S) link, not just Webshare ones.
     """
     try:
-        response = requests.head(url, allow_redirects=True)
+        response = requests.head(url, allow_redirects=True, timeout=30)
     except requests.RequestException as exc:
         logger.error('URL test failed (%s): %s', url, exc)
         return (False, None)
@@ -1493,16 +1501,12 @@ def _bulk_torrent_action(action: str) -> tuple[str, str]:
         return ('Nepodařilo se provést akci v aria2.', 'error')
 
     placeholders = ','.join('?' * len(_BULK_PROTECTED_STATUSES))
-    # Rows without a GID are skipped by torrent_loop while paused, so only
-    # resume (which re-enqueues them) may touch them.
-    gid_filter = (
-        "AND COALESCE(external_id, '') != '' " if action == 'pause' else ''
-    )
+    # Rows without a GID are included: pausing them keeps torrent_loop from
+    # enqueueing them, and resume puts them back in line.
     db = get_db()
     db.execute(
         'UPDATE links SET status = ? '
         "WHERE kind IN ('magnet', 'torrent') "
-        f'{gid_filter}'
         f'AND status NOT IN ({placeholders})',
         (new_status, *_BULK_PROTECTED_STATUSES),
     )

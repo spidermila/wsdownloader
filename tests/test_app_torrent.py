@@ -1231,7 +1231,7 @@ class _BulkClient:
         pass
 
 
-def test_pause_all_skips_empty_gid_rows(app_module, client, monkeypatch):
+def test_pause_all_includes_empty_gid_rows(app_module, client, monkeypatch):
     _make_torrent_row(app_module, url=MAGNET, external_id='g1')
     _make_torrent_row(app_module, url=OTHER, external_id='', status='new')
     third = MAGNET.replace('0123456789abcdef' * 2, 'c' * 32)
@@ -1241,8 +1241,8 @@ def test_pause_all_skips_empty_gid_rows(app_module, client, monkeypatch):
     monkeypatch.setattr(app_module.torrent, 'Aria2Client', _BulkClient)
     client.post('/torrent/pause-all')
     assert _status(app_module, MAGNET) == 'paused'
-    assert _status(app_module, OTHER) == 'new'
-    assert _status(app_module, third) == 'new'
+    assert _status(app_module, OTHER) == 'paused'
+    assert _status(app_module, third) == 'paused'
 
 
 def test_resume_all_includes_empty_gid_paused_rows(

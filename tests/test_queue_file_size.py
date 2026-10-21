@@ -15,7 +15,7 @@ class _FakeHeadResponse:
 
 
 def test_test_url_returns_size_from_content_length(app_module, monkeypatch):
-    def fake_head(url, allow_redirects=True):
+    def fake_head(url, allow_redirects=True, timeout=None):
         return _FakeHeadResponse(
             status_code=200, headers={'Content-Length': '12345'},
         )
@@ -31,7 +31,7 @@ def test_test_url_returns_size_from_content_length(app_module, monkeypatch):
 def test_test_url_without_content_length_returns_none_size(
     app_module, monkeypatch,
 ):
-    def fake_head(url, allow_redirects=True):
+    def fake_head(url, allow_redirects=True, timeout=None):
         return _FakeHeadResponse(status_code=200, headers={})
 
     monkeypatch.setattr(app_module.requests, 'head', fake_head)
@@ -43,7 +43,7 @@ def test_test_url_without_content_length_returns_none_size(
 
 
 def test_test_url_rejects_negative_content_length(app_module, monkeypatch):
-    def fake_head(url, allow_redirects=True):
+    def fake_head(url, allow_redirects=True, timeout=None):
         return _FakeHeadResponse(
             status_code=200, headers={'Content-Length': '-1'},
         )
@@ -59,7 +59,7 @@ def test_test_url_rejects_negative_content_length(app_module, monkeypatch):
 def test_test_url_rejects_content_length_above_int64_max(
     app_module, monkeypatch,
 ):
-    def fake_head(url, allow_redirects=True):
+    def fake_head(url, allow_redirects=True, timeout=None):
         return _FakeHeadResponse(
             status_code=200,
             headers={'Content-Length': str(2 ** 63)},
@@ -74,7 +74,7 @@ def test_test_url_rejects_content_length_above_int64_max(
 
 
 def test_test_url_accepts_int64_max_content_length(app_module, monkeypatch):
-    def fake_head(url, allow_redirects=True):
+    def fake_head(url, allow_redirects=True, timeout=None):
         return _FakeHeadResponse(
             status_code=200,
             headers={'Content-Length': str(2 ** 63 - 1)},
@@ -91,7 +91,7 @@ def test_test_url_accepts_int64_max_content_length(app_module, monkeypatch):
 def test_test_url_unreachable_link_returns_false_and_none(
     app_module, monkeypatch,
 ):
-    def fake_head(url, allow_redirects=True):
+    def fake_head(url, allow_redirects=True, timeout=None):
         return _FakeHeadResponse(status_code=404, headers={})
 
     monkeypatch.setattr(app_module.requests, 'head', fake_head)
@@ -108,7 +108,7 @@ def test_test_url_works_for_arbitrary_non_webshare_link(
     """The size probing is generic HTTP - it isn't Webshare-specific."""
     seen_urls = []
 
-    def fake_head(url, allow_redirects=True):
+    def fake_head(url, allow_redirects=True, timeout=None):
         seen_urls.append(url)
         return _FakeHeadResponse(
             status_code=200, headers={'Content-Length': '999'},
@@ -176,7 +176,7 @@ def test_build_full_update_payload_includes_total_size(app_module):
 def test_index_post_stores_size_for_new_link(client, app_module, monkeypatch):
     """Adding a link via the web form should immediately store its size."""
 
-    def fake_head(url, allow_redirects=True):
+    def fake_head(url, allow_redirects=True, timeout=None):
         return _FakeHeadResponse(
             status_code=200, headers={'Content-Length': '42000'},
         )
@@ -196,7 +196,7 @@ def test_index_post_stores_size_for_new_link(client, app_module, monkeypatch):
 
 
 def test_index_page_shows_total_queue_size(client, app_module, monkeypatch):
-    def fake_head(url, allow_redirects=True):
+    def fake_head(url, allow_redirects=True, timeout=None):
         return _FakeHeadResponse(
             status_code=200, headers={'Content-Length': '2048'},
         )
