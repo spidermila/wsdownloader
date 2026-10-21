@@ -8,7 +8,6 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from time import sleep
 from time import time
-from typing import Optional
 from typing import TypedDict
 
 import requests
@@ -58,7 +57,7 @@ BASE_URL = 'https://webshare.cz/api/'
 MAX_SIZE_BYTES = 2 ** 63 - 1
 
 
-def _validate_size_bytes(size_bytes: int) -> Optional[int]:
+def _validate_size_bytes(size_bytes: int) -> int | None:
     """Return size_bytes if it's a plausible, storable file size, else None."""
     if size_bytes < 0 or size_bytes > MAX_SIZE_BYTES:
         logger.warning(
@@ -92,7 +91,7 @@ def get_db() -> sqlite3.Connection:
     return conn
 
 
-def fetch_oldest() -> Optional[sqlite3.Row]:
+def fetch_oldest() -> sqlite3.Row | None:
     db = get_db()
     try:
         return db.execute("""
@@ -310,7 +309,7 @@ def set_upload_stats_by_id(
         db.close()
 
 
-def get_fs_usage(base_path: Optional[Path] = None) -> dict:
+def get_fs_usage(base_path: Path | None = None) -> dict:
     if base_path is None:
         base_path = DOWNLOADS_PATH
     try:
@@ -673,7 +672,7 @@ def dequeue_file(token: str, file_id) -> str | None:
     return None
 
 
-def add_link_if_new(link_raw: str) -> tuple[bool, str, Optional[int]]:
+def add_link_if_new(link_raw: str) -> tuple[bool, str, int | None]:
     url = (link_raw or '').strip()
     if not url:
         logger.warning('add_link_if_new() Invalid URL: %s', link_raw)
@@ -828,7 +827,7 @@ def _seeding_enabled(settings: dict) -> bool:
     return mode in ('ratio', 'time') and value > 0
 
 
-def _fetch_torrent_bytes(url: str) -> Optional[bytes]:
+def _fetch_torrent_bytes(url: str) -> bytes | None:
     try:
         response = requests.get(url, allow_redirects=True, timeout=30)
         response.raise_for_status()
@@ -844,7 +843,7 @@ def _torrent_file_path(row_id: int) -> Path:
     return TORRENTS_DIR / f'link-{row_id}.torrent'
 
 
-def _load_or_fetch_torrent_bytes(row_id: int, url: str) -> Optional[bytes]:
+def _load_or_fetch_torrent_bytes(row_id: int, url: str) -> bytes | None:
     """Return .torrent bytes, using a cached copy under TORRENTS_DIR if
     available. Fetches from URL and stages the file otherwise."""
     path = _torrent_file_path(row_id)
@@ -884,8 +883,8 @@ def _delete_torrent_file(row_id: int) -> None:
 
 
 def _enqueue_torrent(
-    row: sqlite3.Row, client: 'torrent.Aria2Client', options: dict,
-) -> Optional[str]:
+    row: sqlite3.Row, client: torrent.Aria2Client, options: dict,
+) -> str | None:
     kind = row['kind']
     url = row['url']
     try:
@@ -902,7 +901,7 @@ def _enqueue_torrent(
         return None
 
 
-def _try_remove_result(client: 'torrent.Aria2Client', gid: str) -> None:
+def _try_remove_result(client: torrent.Aria2Client, gid: str) -> None:
     if not gid:
         return
     try:
@@ -913,7 +912,7 @@ def _try_remove_result(client: 'torrent.Aria2Client', gid: str) -> None:
 
 def _apply_torrent_status(
     row: sqlite3.Row, status: dict, seeding_enabled: bool,
-    client: 'torrent.Aria2Client',
+    client: torrent.Aria2Client,
 ) -> None:
     row_id = row['id']
     aria_status = status.get('status', '')

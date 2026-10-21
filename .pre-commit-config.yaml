@@ -21,6 +21,7 @@ repos:
     rev: v3.20.0
     hooks:
     -   id: pyupgrade
+        args: [--py314-plus]
 -   repo: https://github.com/hhatto/autopep8
     rev: v2.3.2
     hooks:
